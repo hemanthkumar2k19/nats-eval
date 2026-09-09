@@ -1,171 +1,134 @@
-# NATS JetStream Streams — Technical Reference & Architecture Considerations
+# NATS JetStream Streams — Technical Reference
 
 ## 1. Purpose
 
-This document provides the technical reference for evaluating and reviewing **NATS JetStream Streams** as a durable messaging and event-storage capability.
+This document provides a technical reference for understanding and evaluating **NATS JetStream Streams**, with a focus on their concepts, internal behaviour, configuration, persistence, replication, and architectural characteristics.
 
 It covers:
 
-* Stream fundamentals and architecture
-* Stream lifecycle and configuration
-* Subject organization
-* Stream sequence management
-* Retention and cleanup
-* Storage and persistence
-* Replication and clustering
+* NATS and JetStream fundamentals
+* Stream architecture and internal concepts
+* Stream configuration
+* Subject organisation and subject matching
+* Stream lifecycle
+* Message storage and persistence
+* Retention and message limits
+* Stream sequences and message state
+* Message deletion and purge behaviour
+* Replication, clustering, and consensus
 * Backup and restore
-* Observability and capacity management
-* Stream partitioning and separation criteria
-* NATS CLI configuration coverage
+* Stream observability and resource management
+* Stream organisation and separation criteria
+* NATS CLI and Stream configuration coverage
 
-This document is intended to support the architectural review and the associated CLI demonstration.
+The purpose of this document is to establish the **NATS concepts and internal mechanisms** required to reason about Stream behaviour and make appropriate architectural decisions.
 
----
-
-# 2. JetStream Overview
-
-NATS provides two messaging models:
-
-### NATS Core
-
-NATS Core provides lightweight, real-time messaging where messages are generally delivered to active subscribers and are not inherently persisted.
-
-### JetStream
-
-JetStream adds persistence and state management capabilities on top of NATS.
-
-JetStream provides capabilities including:
-
-* Durable message storage
-* Message replay
-* Retention policies
-* Stream sequencing
-* Replication
-* Consumer state
-* Message management
-* Snapshot and restore
-
-The central persistence construct in JetStream is the **Stream**.
+This document is a **technical reference**. CLI demonstration procedures and demo-specific steps are maintained separately.
 
 ---
 
-# 3. Stream Concept
+# 2. NATS and JetStream Fundamentals
 
-A JetStream Stream captures messages published to configured NATS subjects.
+## 2.1 NATS
 
-Conceptually:
+NATS is a lightweight messaging system based around subjects.
 
-```text
-Publisher
-    |
-    v
-NATS Subject
-    |
-    | Subject matching
-    v
-+----------------------+
-| JetStream Stream     |
-|----------------------|
-| Stored Messages      |
-| Stream Sequences     |
-| Retention Policy     |
-| Storage              |
-| Limits               |
-| Replication          |
-+----------------------+
-```
-
-A Stream therefore represents a **message persistence and lifecycle boundary**.
-
-The Stream configuration determines:
-
-* Which messages are captured
-* Where messages are stored
-* How long they are retained
-* How much data can be retained
-* How messages are discarded
-* Whether the Stream is replicated
-* Which administrative operations are permitted
-
----
-
-## 4. Stream Configuration Reference
-
-The following table consolidates the Stream configuration fields relevant to the current NATS JetStream review. It describes the supported values, their behavioral impact, and defaults.
-
-| Configuration                | Value / Option       | Description                                                                                                                                                 | Default |
-| ---------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | :-----: |
-| **Name**                     | String               | Unique identifier of the Stream. Used for all Stream administration and management operations.                                                              |    —    |
-| **Description**              | String               | Human-readable description of the Stream's purpose. Does not affect message processing.                                                                     |  Empty  |
-| **Subjects**                 | Subject list         | Defines the NATS subjects captured by the Stream. Multiple subjects and wildcard patterns can be configured.                                                |  Empty  |
-| **Subjects**                 | `*`                  | Matches exactly one subject token. Example: `order.*` matches `order.created` and `order.placed`.                                                           |         |
-| **Subjects**                 | `>`                  | Matches one or more subject tokens at the end of a subject. Example: `order.>` matches `order.customer.created`.                                            |         |
-| **Retention**                | `limits`             | Retains messages according to configured limits such as `max_msgs`, `max_bytes`, and `max_age`. General-purpose retention model.                            |    ✓    |
-| **Retention**                | `interest`           | Message retention is influenced by consumer interest.                                                                                                       |         |
-| **Retention**                | `workqueue`          | Messages follow work-queue retention semantics.                                                                                                             |         |
-| **Max Consumers**            | `-1`                 | No configured limit on the number of consumers.                                                                                                             |    ✓    |
-| **Max Consumers**            | Positive integer     | Maximum number of consumers that can be associated with the Stream.                                                                                         |         |
-| **Max Messages per Subject** | `-1`                 | No per-subject message-count limit.                                                                                                                         |    ✓    |
-| **Max Messages per Subject** | Positive integer     | Maximum messages retained for each concrete subject. For `order.*`, the limit applies independently to `order.created`, `order.placed`, etc.                |         |
-| **Max Messages**             | `-1`                 | No total message-count limit.                                                                                                                               |    ✓    |
-| **Max Messages**             | Positive integer     | Maximum number of messages retained in the Stream.                                                                                                          |         |
-| **Max Bytes**                | `-1`                 | No total byte limit.                                                                                                                                        |    ✓    |
-| **Max Bytes**                | Positive integer     | Maximum amount of message data retained by the Stream.                                                                                                      |         |
-| **Max Age**                  | `0`                  | No age-based expiration.                                                                                                                                    |    ✓    |
-| **Max Age**                  | Duration             | Maximum age for retained messages. Messages exceeding the configured age become eligible for removal.                                                       |         |
-| **Max Message Size**         | `-1`                 | No Stream-specific maximum message size.                                                                                                                    |    ✓    |
-| **Max Message Size**         | Positive integer     | Maximum size of an individual message accepted by the Stream.                                                                                               |         |
-| **Storage**                  | `file`               | Persists Stream messages to disk. Messages survive a NATS server restart when the underlying storage is persistent.                                         |    ✓    |
-| **Storage**                  | `memory`             | Stores Stream messages in memory. Messages do not survive a NATS server restart.                                                                            |         |
-| **Num Replicas**             | `1`                  | Single Stream replica. No Stream-level replica redundancy.                                                                                                  |    ✓    |
-| **Num Replicas**             | `3`                  | Maintains three Stream replicas across suitable JetStream servers. Provides tolerance for individual replica/server failure while quorum remains available. |         |
-| **Num Replicas**             | `5`                  | Maintains five Stream replicas across suitable JetStream servers. Provides higher failure tolerance at additional resource cost.                            |         |
-| **Discard**                  | `old`                | When applicable limits are reached, older messages are discarded to allow newer messages to be retained.                                                    |    ✓    |
-| **Discard**                  | `new`                | New messages are rejected/discarded when the configured limits prevent additional storage.                                                                  |         |
-| **Duplicate Window**         | `0`                  | Uses the server's default duplicate-detection behavior.                                                                                                     |    ✓    |
-| **Duplicate Window**         | Duration             | Defines how long JetStream tracks message identifiers for duplicate detection.                                                                              |         |
-| **Sealed**                   | `false`              | Stream remains operational and can continue to accept messages according to its configuration.                                                              |    ✓    |
-| **Sealed**                   | `true`               | Seals the Stream and prevents further message storage. This is a lifecycle/terminal operation rather than a normal configuration change.                    |         |
-| **Deny Delete**              | `false`              | Stream can be deleted through normal administrative operations.                                                                                             |    ✓    |
-| **Deny Delete**              | `true`               | Prevents deletion of the Stream through normal administrative operations.                                                                                   |         |
-| **Deny Purge**               | `false`              | Messages can be removed using Stream purge operations.                                                                                                      |    ✓    |
-| **Deny Purge**               | `true`               | Prevents purge operations against the Stream.                                                                                                               |         |
-| **Allow Rollup Headers**     | `false`              | Rollup functionality is disabled.                                                                                                                           |    ✓    |
-| **Allow Rollup Headers**     | `true`               | Enables the Stream to process supported rollup headers.                                                                                                     |         |
-| **Allow Direct**             | `false`              | Direct Stream message retrieval is disabled.                                                                                                                |    ✓    |
-| **Allow Direct**             | `true`               | Enables direct retrieval of Stream messages through the direct Stream API path.                                                                             |         |
-| **Mirror Direct**            | `false`              | Direct access behavior for mirrored Streams is disabled.                                                                                                    |    ✓    |
-| **Mirror Direct**            | `true`               | Enables direct access behavior for mirrored Streams. Relevant when using Stream mirrors.                                                                    |         |
-| **Consumer Limits**          | `{}`                 | No Stream-level consumer limits explicitly configured.                                                                                                      |    ✓    |
-| **Consumer Limits**          | Configuration object | Defines Stream-level constraints/defaults for consumer configuration. Detailed consumer behavior is outside this review.                                    |         |
-
-### Configuration Scope
-
-The fields above can be grouped conceptually into five architectural decisions:
-
-| Decision                                           | Configuration                                                                           |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **What enters the Stream?**                        | `subjects`                                                                              |
-| **How much / how long is retained?**               | `retention`, `max_msgs`, `max_msgs_per_subject`, `max_bytes`, `max_age`, `max_msg_size` |
-| **Where is it stored?**                            | `storage`                                                                               |
-| **How much failure tolerance is required?**        | `num_replicas`                                                                          |
-| **How is the Stream administratively controlled?** | `discard`, `duplicate_window`, `sealed`, `deny_delete`, `deny_purge`, capability flags  |
-
-**Architecture note:** `storage` and `num_replicas` should be treated differently from ordinary operational limits. Storage determines the underlying persistence model, while replication depends on the JetStream cluster topology. Both therefore have stronger lifecycle/topology constraints than properties such as `max_msgs` or `max_age`.
-
----
-
-# 5. Subjects and Stream Scope
-
-Subjects define the messages captured by a Stream.
+A publisher sends a message to a subject, and subscribers receive messages based on subject subscriptions.
 
 For example:
 
 ```text
-order.*
+order.created
+order.placed
+order.cancelled
+payment.completed
+payment.failed
 ```
 
-captures:
+Core NATS provides real-time messaging, but messages are generally transient. A message is delivered to active subscribers and is not inherently stored as durable event history.
+
+JetStream extends NATS with **persistence and message storage**.
+
+---
+
+## 2.2 JetStream
+
+JetStream is the persistence and streaming subsystem of NATS.
+
+It introduces durable message storage, allowing messages to be retained independently of whether a subscriber was connected at the time of publication.
+
+Conceptually:
+
+```text
+                  NATS
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+   Core NATS              JetStream
+  Real-time messaging     Persistence
+                              │
+                           Streams
+                              │
+                         Stored Messages
+```
+
+JetStream therefore provides the storage layer required for use cases such as:
+
+* Event history
+* Durable messaging
+* Work queues
+* Replayable events
+* Event-driven workflows
+* Integration event storage
+
+NATS documentation describes JetStream as the durable messaging capability built into NATS.
+
+---
+
+# 3. JetStream Architecture
+
+A useful conceptual model is:
+
+```text
+Publisher
+    │
+    │ publish(subject, message)
+    ▼
+NATS Server
+    │
+    │ subject matching
+    ▼
+JetStream Stream
+    │
+    ├── Message Storage
+    ├── Stream Sequence
+    ├── Retention
+    ├── Limits
+    └── Replication
+```
+
+A Stream is therefore not simply a topic.
+
+A subject determines **where messages are published**.
+
+A Stream determines **which messages are captured and how those messages are stored and managed**.
+
+---
+
+## 3.1 Stream as a Storage Boundary
+
+A Stream defines a durable storage boundary around one or more NATS subjects.
+
+For example:
+
+```text
+Stream: EVENTS
+
+Subjects:
+    order.*
+```
+
+The Stream captures messages published to:
 
 ```text
 order.created
@@ -173,23 +136,127 @@ order.placed
 order.cancelled
 ```
 
-A Stream can also capture multiple subject patterns:
+while messages published to unrelated subjects are not part of the Stream.
+
+A Stream therefore combines:
+
+* Subject scope
+* Storage
+* Retention
+* Message limits
+* Sequence management
+* Replication configuration
+* Lifecycle controls
+
+---
+
+# 4. Stream Concepts
+
+A JetStream Stream has several fundamental dimensions.
+
+| Dimension          | Determines                                       |
+| ------------------ | ------------------------------------------------ |
+| Subjects           | Which messages belong to the Stream              |
+| Storage            | Where messages are persisted                     |
+| Retention          | When messages cease to be retained               |
+| Limits             | Maximum messages, bytes, age, etc.               |
+| Sequence           | Position of messages within the Stream           |
+| Replicas           | Number of copies maintained                      |
+| Discard policy     | Behaviour when configured limits are reached     |
+| Lifecycle controls | Whether administrative deletion/purge is allowed |
+
+These dimensions should be considered independently.
+
+For example:
 
 ```text
-order.*
-payment.*
+Subject scope
+      +
+Retention policy
+      +
+Storage type
+      +
+Replication
+      +
+Capacity limits
+      =
+Stream behaviour
 ```
 
-This allows multiple event types to share the same persistence boundary.
+---
 
-## Subject Wildcards
+# 5. Stream Configuration Reference
 
-NATS supports:
+The following represents the primary Stream configuration concepts relevant to architectural evaluation.
 
-* `*` — matches one subject token
-* `>` — matches one or more subject tokens at the end of a subject
+| Configuration            | Value / Option       | Description                                         | Default |
+| ------------------------ | -------------------- | --------------------------------------------------- | ------- |
+| Name                     | String               | Unique Stream identifier                            | —       |
+| Description              | String               | Human-readable Stream description                   | Empty   |
+| Subjects                 | Subject list         | Subjects captured by the Stream                     | —       |
+| Subjects                 | `*`                  | Matches exactly one subject token                   |         |
+| Subjects                 | `>`                  | Matches one or more trailing subject tokens         |         |
+| Retention                | `limits`             | Retention governed by configured limits             | ✓       |
+| Retention                | `interest`           | Messages retained based on consumer interest        |         |
+| Retention                | `workqueue`          | Work-queue-oriented retention semantics             |         |
+| Max Consumers            | `-1`                 | No configured consumer limit                        | ✓       |
+| Max Consumers            | Positive integer     | Maximum number of consumers                         |         |
+| Max Messages per Subject | `-1`                 | No per-subject message limit                        | ✓       |
+| Max Messages per Subject | Positive integer     | Maximum messages retained for each concrete subject |         |
+| Max Messages             | `-1`                 | No total message-count limit                        | ✓       |
+| Max Messages             | Positive integer     | Maximum messages retained by the Stream             |         |
+| Max Bytes                | `-1`                 | No total byte limit                                 | ✓       |
+| Max Bytes                | Positive integer     | Maximum message data retained                       |         |
+| Max Age                  | `0`                  | No age-based expiration                             | ✓       |
+| Max Age                  | Duration             | Maximum age of retained messages                    |         |
+| Max Message Size         | `-1`                 | No Stream-specific message-size limit               | ✓       |
+| Max Message Size         | Positive integer     | Maximum size of an individual message               |         |
+| Storage                  | `file`               | File-backed persistent storage                      | ✓       |
+| Storage                  | `memory`             | In-memory storage                                   |         |
+| Num Replicas             | `1`                  | Single Stream replica                               | ✓       |
+| Num Replicas             | `3`                  | Three Stream replicas                               |         |
+| Num Replicas             | `5`                  | Five Stream replicas                                |         |
+| Discard                  | `old`                | Discard older messages when limits are reached      | ✓       |
+| Discard                  | `new`                | Reject/discard new messages when limits are reached |         |
+| Duplicate Window         | `0`                  | Default duplicate-detection behaviour               | ✓       |
+| Duplicate Window         | Duration             | Time window for duplicate detection                 |         |
+| Sealed                   | `false`              | Stream remains mutable                              | ✓       |
+| Sealed                   | `true`               | Prevents further modification to Stream data        |         |
+| Deny Delete              | `false`              | Message deletion permitted                          | ✓       |
+| Deny Delete              | `true`               | Prevents message deletion                           |         |
+| Deny Purge               | `false`              | Stream purge permitted                              | ✓       |
+| Deny Purge               | `true`               | Prevents Stream purge                               |         |
+| Allow Rollup Headers     | `false`              | Rollup headers not permitted                        | ✓       |
+| Allow Rollup Headers     | `true`               | Allows rollup operations                            |         |
+| Allow Direct             | `false`              | Direct message access disabled                      | ✓       |
+| Allow Direct             | `true`               | Allows direct message access                        |         |
+| Mirror Direct            | `false`              | Direct mirror access disabled                       | ✓       |
+| Mirror Direct            | `true`               | Allows direct access for mirror scenarios           |         |
+| Consumer Limits          | Configuration object | Stream-level limits applicable to consumers         | `{}`    |
 
-Example:
+NATS also exposes additional Stream configuration capabilities in newer server/API versions, including subject transforms, placement constraints, sources, mirrors, republish configuration, compression, metadata, message TTL-related options, and other advanced features. The exact set available depends on the NATS Server/API version in use.
+
+---
+
+# 6. Subjects and Subject Matching
+
+Subjects define the message namespace used by NATS.
+
+A subject consists of tokens separated by `.`.
+
+For example:
+
+```text
+order.created
+order.payment.completed
+customer.profile.updated
+```
+
+Two wildcard tokens are fundamental:
+
+### `*`
+
+Matches exactly one token.
 
 ```text
 order.*
@@ -200,293 +267,66 @@ matches:
 ```text
 order.created
 order.placed
+order.cancelled
 ```
 
-but not:
+but does not match:
 
 ```text
-order.customer.created
+order.payment.completed
 ```
 
-A broader pattern:
+### `>`
+
+Matches one or more trailing tokens.
 
 ```text
 order.>
 ```
 
-can match hierarchical subjects such as:
+can match:
 
 ```text
 order.created
-order.customer.created
-order.customer.address.updated
-```
-
-Subject design should therefore be deliberate because the Stream's subject configuration determines its message scope.
-
----
-
-# 6. Stream Lifecycle
-
-The Stream lifecycle can be viewed as:
-
-```text
-Create
-  |
-  v
-Configure
-  |
-  v
-Capture Messages
-  |
-  v
-Sequence Assignment
-  |
-  v
-Retention / Cleanup
-  |
-  v
-Configuration Updates
-  |
-  v
-Backup / Recovery
-  |
-  v
-Retirement / Deletion
-```
-
-A Stream is a long-lived configuration and persistence object. Individual messages have their own lifecycle within that Stream.
-
----
-
-# 7. Creating a Stream
-
-A Stream is created by supplying a Stream configuration.
-
-Important creation decisions include:
-
-### Subject Scope
-
-Which messages should the Stream capture?
-
-### Retention
-
-How should messages be retained?
-
-### Storage
-
-Should messages be kept in memory or persisted to file?
-
-### Limits
-
-How much data should the Stream retain?
-
-### Replication
-
-How many replicas are required?
-
-### Discard Behavior
-
-What should happen when configured limits are reached?
-
-These decisions establish the initial operational behavior of the Stream.
-
----
-
-# 8. Stream Updates
-
-Stream configuration is not entirely immutable.
-
-Operational policies can be updated for supported fields, including configuration such as:
-
-* Subject definitions
-* Retention
-* Message limits
-* Maximum age
-* Maximum bytes
-* Maximum message size
-* Discard policy
-* Duplicate detection configuration
-* Supported Stream capabilities
-
-However, some configuration is tied to the underlying storage or cluster topology.
-
-## Storage
-
-The storage mode:
-
-```text
-memory
-file
-```
-
-should be considered a Stream creation/storage decision rather than a normal runtime policy update.
-
-## Replication
-
-The replica count:
-
-```text
-1
-3
-5
-```
-
-is dependent on the JetStream cluster topology and available servers.
-
-Therefore, Stream updates should be categorized into:
-
-```text
-Operational Policies
-        |
-        +-- Generally updateable
-
-
-Storage / Topology
-        |
-        +-- More constrained
+order.payment.completed
+order.shipping.address.updated
 ```
 
 ---
 
-# 9. Stream Storage
+## 6.1 Subject Scope
 
-JetStream provides:
+Subjects determine the boundary of the Stream's captured message set.
 
-```text
-Memory Storage
-File Storage
-```
-
-## 9.1 Memory Storage
-
-Memory storage maintains Stream data in memory.
-
-Characteristics:
-
-* Low-latency access
-* No persistent Stream data across server restart
-* Requires sufficient memory for retained data
-* Suitable where persistence is not required
-
-Conceptually:
+For example:
 
 ```text
-Stream
-   |
-   v
-Memory
+Stream: ORDER_EVENTS
+
+Subjects:
+    order.*
 ```
 
-## 9.2 File Storage
+means the Stream captures messages matching that subject pattern.
 
-File storage persists Stream data to disk.
+The Stream does not create a separate storage object for each wildcard expression.
 
-Characteristics:
-
-* Durable across NATS server restart
-* Requires persistent disk
-* Requires capacity planning
-* Suitable for durable event storage
-
-Conceptually:
-
-```text
-Stream
-   |
-   v
-Persistent Storage
-```
-
-For containerized deployments, the JetStream storage directory must be backed by persistent storage if data must survive container recreation.
+The wildcard defines the **matching rule**.
 
 ---
 
-# 10. Storage Capacity
+## 6.2 Per-Subject Limits
 
-File-backed Stream capacity depends primarily on:
+`max_msgs_per_subject` applies to each **concrete subject**, not to the wildcard expression itself.
 
-```text
-Message Rate
-×
-Average Message Size
-×
-Retention Duration
-```
-
-The resulting estimate should also account for:
-
-* Replication
-* Operational overhead
-* Growth
-* Recovery requirements
-* Storage safety margin
-
-A Stream's configured `max_bytes` can be used to impose an explicit upper bound on retained message data.
-
----
-
-# 11. Retention Policies
-
-JetStream supports three primary retention policies:
+For:
 
 ```text
-limits
-interest
-workqueue
+Subjects:
+    order.*
 ```
 
-## 11.1 Limits Policy
-
-Messages are retained according to configured limits such as:
-
-* Maximum messages
-* Maximum bytes
-* Maximum age
-
-This is the general-purpose retention model.
-
-## 11.2 Interest Policy
-
-Retention is associated with consumer interest.
-
-The message lifecycle therefore depends on consumer state.
-
-## 11.3 Work Queue Policy
-
-Messages are managed according to work-queue semantics.
-
-Interest and Work Queue policies should be evaluated together with the intended consumer model.
-
----
-
-# 12. Message Limits
-
-JetStream provides multiple mechanisms for controlling Stream growth.
-
-### Maximum Messages
-
-```text
-max_msgs
-```
-
-Controls the total number of messages retained.
-
-### Maximum Messages Per Subject
-
-```text
-max_msgs_per_subject
-```
-
-Controls the number of messages retained for each concrete subject.
-
-For a Stream capturing:
-
-```text
-order.*
-```
-
-the limit applies independently to:
+the following are independent concrete subjects:
 
 ```text
 order.created
@@ -494,99 +334,397 @@ order.placed
 order.cancelled
 ```
 
-It does not mean one combined limit for the wildcard `order.*`.
+Therefore:
 
-### Maximum Bytes
+```text
+max_msgs_per_subject = 1000
+```
+
+means that each matching concrete subject can retain up to the configured limit.
+
+It does **not** mean that all `order.*` messages share a single 1000-message bucket.
+
+---
+
+# 7. Stream Lifecycle
+
+A Stream progresses through a lifecycle consisting broadly of:
+
+```text
+Create
+  │
+  ▼
+Active
+  │
+  ├── Update
+  │
+  ├── Retain / Expire
+  │
+  ├── Delete Messages
+  │
+  ├── Purge
+  │
+  └── Seal
+        │
+        ▼
+     Terminal State
+```
+
+## 7.1 Creation
+
+At creation time, the Stream establishes:
+
+* Name
+* Subject scope
+* Retention model
+* Storage model
+* Capacity limits
+* Replication configuration
+* Administrative controls
+
+These choices establish the Stream's fundamental behaviour.
+
+---
+
+## 7.2 Update
+
+A Stream can be updated to modify supported configuration properties.
+
+Typical operationally adjustable properties include:
+
+* Description
+* Subjects
+* Retention configuration
+* Message limits
+* Age limits
+* Discard policy
+* Duplicate window
+* Administrative permissions
+
+Some properties are constrained by the underlying storage or cluster topology.
+
+For example, changing the conceptual storage model from memory-backed storage to file-backed storage is not equivalent to changing a simple metadata field.
+
+Similarly, increasing replication requires suitable JetStream servers capable of hosting the additional replicas.
+
+---
+
+## 7.3 Sealing
+
+A Stream can be sealed to prevent further changes to the stored message set.
+
+Sealing should be treated as a lifecycle operation rather than a normal configuration toggle.
+
+A sealed Stream is therefore appropriate for scenarios where the retained event history is intended to become immutable.
+
+---
+
+# 8. Message Storage and Persistence
+
+JetStream supports two primary storage modes:
+
+```text
+File
+Memory
+```
+
+## 8.1 File Storage
+
+File-backed storage persists Stream messages to the server's filesystem.
+
+Conceptually:
+
+```text
+Publisher
+    │
+    ▼
+JetStream
+    │
+    ▼
+Disk
+```
+
+Advantages:
+
+* Durable across server process restart
+* Suitable for persistent event storage
+* Supports larger datasets than memory-only storage
+* Appropriate for production durable messaging
+
+Actual durability also depends on the underlying filesystem, disk, container volume, and infrastructure configuration.
+
+---
+
+## 8.2 Memory Storage
+
+Memory-backed Streams retain messages in server memory.
+
+```text
+Publisher
+    │
+    ▼
+JetStream
+    │
+    ▼
+Memory
+```
+
+Advantages:
+
+* Lower storage overhead
+* Fast access
+* Useful for transient or high-speed workloads
+
+Trade-off:
+
+* Stored data is not durable across server restart in the same way as file-backed storage.
+
+Memory storage should therefore be selected when the loss of retained Stream data following server failure is acceptable.
+
+---
+
+# 9. Retention Policies
+
+Retention determines when JetStream is allowed to remove messages.
+
+The major retention modes are:
+
+```text
+Limits
+Interest
+Work Queue
+```
+
+## 9.1 Limits Retention
+
+`limits` is the general-purpose retention model.
+
+Messages remain available until one or more configured limits causes them to be removed.
+
+Relevant limits include:
+
+* Maximum messages
+* Maximum messages per subject
+* Maximum bytes
+* Maximum age
+
+Conceptually:
+
+```text
+Message
+   │
+   ├── max age exceeded ──────► Remove
+   │
+   ├── max messages exceeded ─► Remove
+   │
+   └── max bytes exceeded ────► Remove
+```
+
+---
+
+## 9.2 Interest Retention
+
+Interest retention relates message retention to consumer interest.
+
+The retention decision therefore depends on whether there are consumers with an applicable interest in the message.
+
+This model is useful when the Stream represents messages that only need to exist while required consumers still have interest in them.
+
+---
+
+## 9.3 Work Queue Retention
+
+Work-queue retention is designed around queue-style processing.
+
+The conceptual model is:
+
+```text
+Message
+   │
+   ▼
+Available for processing
+   │
+   ▼
+Consumed
+   │
+   ▼
+No longer required
+```
+
+It is therefore different from an event-history Stream whose primary purpose is replay.
+
+---
+
+# 10. Message Limits and Cleanup
+
+Retention limits provide the mechanisms through which Stream storage is bounded.
+
+### Maximum messages
+
+```text
+max_msgs
+```
+
+defines the maximum number of messages retained by the Stream.
+
+### Maximum messages per subject
+
+```text
+max_msgs_per_subject
+```
+
+defines the maximum retained messages for each concrete subject.
+
+### Maximum bytes
 
 ```text
 max_bytes
 ```
 
-Controls the total amount of retained message data.
+limits total retained message data.
 
-### Maximum Age
+### Maximum age
 
 ```text
 max_age
 ```
 
-Controls how long messages can remain based on age.
+removes messages once they exceed the configured age.
 
-### Maximum Message Size
+### Maximum message size
 
 ```text
 max_msg_size
 ```
 
-restricts the size of an individual message.
+restricts the size of individual messages accepted into the Stream.
+
+These limits can operate together.
+
+For example:
+
+```text
+max_msgs = 1,000,000
+max_bytes = 10 GB
+max_age = 7 days
+```
+
+means retention is bounded by all configured constraints rather than by only one of them.
 
 ---
 
-# 13. Discard Policy
+# 11. Discard Behaviour
 
-When a Stream reaches applicable limits, its discard policy determines how additional messages are handled.
+When a Stream reaches a configured limit, the `discard` policy determines which side of the boundary is affected.
 
-Supported policies include:
+## `discard: old`
+
+Older messages are removed to make room for newer messages.
+
+Conceptually:
 
 ```text
-old
-new
+Oldest ─────────────────── Newest
+   X                         +
+   │                         │
+ removed                    added
 ```
 
-## Discard Old
+This is appropriate for bounded event history where the newest events are considered more valuable.
 
-Older retained messages are removed to make room for new messages.
+## `discard: new`
 
-## Discard New
+New messages are rejected/discarded when the configured limit prevents additional storage.
 
-New messages can be rejected/discarded when the Stream cannot accept additional data under the configured limits.
+Conceptually:
 
-The choice depends on whether the application prioritizes retaining the newest events or preserving the existing retained dataset.
+```text
+Existing messages → retained
+
+New message
+     │
+     ▼
+Limit reached
+     │
+     ▼
+Rejected
+```
+
+This is appropriate when preserving the existing dataset is more important than accepting new messages.
 
 ---
 
-# 14. Stream Sequence
+# 12. Stream Sequences
 
-Every message stored in a Stream receives a Stream Sequence.
+JetStream assigns a monotonically increasing **Stream Sequence** to stored messages.
 
-Example:
+Conceptually:
 
 ```text
-Sequence    Message
-1           Order-1
-2           Order-2
-3           Order-3
-4           Order-4
+Sequence    Subject
+--------    ----------------
+1           order.created
+2           order.placed
+3           order.cancelled
+4           order.created
+5           order.placed
 ```
 
-The Stream exposes boundaries:
+The Stream sequence provides an ordered position within the Stream.
+
+It is independent of the application-level event identifier.
+
+For example:
 
 ```text
-First Sequence → oldest retained message
-Last Sequence  → newest retained message
+Stream Sequence = 42
+Order ID        = ORD-10021
 ```
 
-## Sequence Advancement
+These represent different concepts.
 
-When a new message is stored:
+---
+
+## 12.1 First and Last Sequence
+
+A Stream maintains a current sequence range.
+
+Conceptually:
 
 ```text
-Last Sequence
-      ↓
+FirstSeq ------------------------ LastSeq
+   101                              250
+```
+
+`FirstSeq` represents the oldest currently retained sequence.
+
+`LastSeq` represents the newest currently retained sequence.
+
+As old messages expire:
+
+```text
+FirstSeq
+   │
+   ▼
 moves forward
 ```
 
-When old messages are removed:
+As new messages arrive:
 
 ```text
-First Sequence
-      ↓
+LastSeq
+   │
+   ▼
 moves forward
 ```
 
-Deleting a message does not cause remaining messages to be renumbered.
+---
 
-Example:
+## 12.2 Sequence Gaps
+
+Deleting a message does not renumber subsequent messages.
+
+For example:
 
 ```text
 1  2  3  4  5
@@ -598,122 +736,139 @@ Delete sequence `3`:
 1  2     4  5
 ```
 
-A later message receives the next sequence:
+The next published message receives:
 
 ```text
-1  2     4  5  6
+6
 ```
 
-Sequence values therefore provide a historical position within the Stream.
+The Stream therefore preserves sequence identity rather than compacting the sequence after deletion.
 
 ---
 
-# 15. Message Deletion
+## 12.3 Initial Sequence
 
-JetStream supports deletion of individual Stream messages.
+The initial Stream sequence and the current Stream `FirstSeq` are different concepts.
 
-A message can be identified using its Stream Sequence.
+The initial sequence controls the starting sequence numbering when the Stream is established.
 
-This is different from purging the Stream because individual deletion targets a specific stored message while preserving other Stream data.
-
-Sequence gaps resulting from deletion are not automatically filled.
+The current `FirstSeq` represents the oldest sequence currently retained after normal Stream operation.
 
 ---
 
-# 16. Stream Purge
+# 13. Message Deletion and Purging
 
-Purge provides bulk message cleanup.
+JetStream supports removal of individual messages as well as bulk removal.
 
-The NATS CLI supports sequence-based and count-based purge operations.
+## 13.1 Individual Message Deletion
 
-### Purge by Sequence
+An individual message can be removed using its Stream sequence.
 
-The `--seq` option establishes a sequence boundary.
-
-For:
+For example:
 
 ```text
---seq=6
+1  2  3  4  5
+      X
 ```
 
-messages before sequence 6 are purged.
+After deletion:
 
 ```text
-[1][2][3][4][5] [6][7][8]
-----------------  --------
-     Purged          Kept
+1  2     4  5
 ```
 
-### Keep Latest Messages
-
-The `--keep` option keeps a specified number of newest messages.
-
-For:
-
-```text
---keep=3
-```
-
-the latest three messages remain.
-
-This is a one-time administrative cleanup operation.
-
-It should not be confused with:
-
-```text
-max_msgs
-```
-
-which establishes an ongoing Stream retention limit.
+The sequence is not reused.
 
 ---
 
-# 17. Duplicate Detection
+## 13.2 Purge
 
-JetStream supports duplicate detection through a duplicate window.
+A purge removes multiple messages from a Stream.
 
-Publishers can associate a message identifier with a message.
+Purging can be scoped according to available purge criteria such as:
+
+* Sequence boundary
+* Subject
+* Number of messages to retain
+
+For example, conceptually:
+
+```text
+1  2  3  4  5  6  7
+
+Purge before 6
+
+1  2  3  4  5     X
+
+Remaining:
+6  7
+```
+
+Purging is an administrative operation and is distinct from automatic retention.
+
+---
+
+## 13.3 Retention vs Purge
+
+These should not be treated as the same mechanism.
+
+| Mechanism   | Purpose                                 |
+| ----------- | --------------------------------------- |
+| `max_msgs`  | Continuous automatic retention boundary |
+| `max_bytes` | Continuous storage boundary             |
+| `max_age`   | Continuous age-based expiration         |
+| Delete      | Explicit removal of selected messages   |
+| Purge       | Explicit bulk removal                   |
+
+Retention is part of the Stream's ongoing lifecycle.
+
+Purge is an administrative action.
+
+---
+
+# 14. Duplicate Detection
+
+JetStream supports duplicate detection using the message identifier supplied through the NATS message headers.
+
+A publisher can associate a unique message identifier with a message.
+
+JetStream can then use the configured duplicate window to identify repeated publication of the same message.
 
 Conceptually:
 
 ```text
-Message ID = event-123
-
-First publish
-     ↓
-Accepted
-
-Duplicate publish within window
-     ↓
-Identified as duplicate
+Publisher
+   │
+   ├── Message ID = MSG-100
+   │
+   ▼
+JetStream
+   │
+   ├── First MSG-100 → Stored
+   │
+   └── Duplicate MSG-100 within window
+                    │
+                    ▼
+                 Detected
 ```
 
-The duplicate window determines how long the Stream maintains the information required to identify duplicate publishes.
+The duplicate window therefore provides protection against certain publisher retry scenarios.
+
+It should not be confused with application-level exactly-once processing.
 
 ---
 
-# 18. Stream Replication
+# 15. Replication
 
-JetStream can replicate Stream state across multiple NATS servers.
+JetStream Streams can be replicated across multiple NATS servers.
 
-Example:
-
-```text
-                 EVENTS
-                    |
-        +-----------+-----------+
-        |           |           |
-      NATS-1      NATS-2      NATS-3
-      Replica     Replica     Replica
-```
-
-The Stream replica count is configured using:
+The primary configuration concept is:
 
 ```text
 num_replicas
 ```
 
-Common replication configurations include:
+Typical values include:
 
 ```text
 1
@@ -721,270 +876,440 @@ Common replication configurations include:
 5
 ```
 
-subject to the available JetStream cluster topology.
+Conceptually:
+
+```text
+                 Stream
+                   │
+          ┌────────┼────────┐
+          ▼        ▼        ▼
+       Replica 1 Replica 2 Replica 3
+          │        │        │
+       NATS-1   NATS-2   NATS-3
+```
 
 Replication provides resilience against server failure.
 
 ---
 
-# 19. NATS Cluster and JetStream Replication
+## 15.1 Single Replica
 
-A **NATS cluster** and a **replicated Stream** are related but different concepts.
-
-### NATS Cluster
-
-Defines the participating NATS servers.
+With:
 
 ```text
-NATS-1
-NATS-2
-NATS-3
+num_replicas = 1
 ```
 
-### Stream Replication
+there is only one Stream replica.
 
-Defines how a particular Stream's state is replicated.
-
-```text
-EVENTS
- ├── Replica 1
- ├── Replica 2
- └── Replica 3
-```
-
-A three-node NATS cluster does not imply that every Stream is configured with three replicas.
-
-Replication is a Stream-level decision.
+A server failure can therefore make the Stream unavailable.
 
 ---
 
-# 20. Consensus and Quorum
+## 15.2 Three Replicas
 
-Replicated JetStream state requires coordination between replicas.
-
-A replicated Stream uses a consensus mechanism to maintain consistent state.
-
-For three replicas:
+With:
 
 ```text
-NATS-1
-NATS-2
-NATS-3
+num_replicas = 3
 ```
 
-a majority/quorum is required for normal replicated operation.
+the Stream can be distributed across three suitable JetStream servers.
 
-This provides resilience against individual server failure.
-
-Replication should therefore be evaluated against:
-
-* Required availability
-* Failure tolerance
-* Storage overhead
-* Network overhead
-* Cluster size
-* Operational complexity
+This provides tolerance for a server failure while maintaining quorum.
 
 ---
 
-# 21. Replication vs Backup
+## 15.3 Five Replicas
 
-Replication and backup solve different problems.
+Five replicas provide greater failure tolerance but also increase:
 
-| Capability   | Primary Purpose               |
-| ------------ | ----------------------------- |
-| File Storage | Persistence                   |
-| Replication  | Availability / server failure |
-| Backup       | Recovery / disaster recovery  |
+* Storage consumption
+* Network traffic
+* Replication overhead
+* Resource requirements
+
+Replication should therefore be selected according to availability requirements rather than simply maximised.
+
+---
+
+# 16. Consensus and Quorum
+
+JetStream replication is associated with a consensus-based replication model.
+
+For a three-replica group:
+
+```text
+Replica 1
+Replica 2
+Replica 3
+```
+
+a majority requires:
+
+```text
+2 / 3
+```
+
+replicas.
+
+Therefore:
+
+```text
+3 replicas
+    │
+    ├── 1 failure → quorum maintained
+    │
+    └── 2 failures → quorum lost
+```
+
+This is the architectural reason a three-replica Stream provides resilience against a single server failure but not against two simultaneous replica failures.
+
+Replication therefore has two dimensions:
+
+1. **Data redundancy**
+2. **Availability through quorum**
+
+A replica count should consequently be evaluated together with cluster topology.
+
+---
+
+# 17. NATS Cluster vs Stream Replication
+
+These concepts should not be conflated.
+
+## NATS Cluster
+
+A NATS cluster is a group of NATS servers that communicate through server-to-server routes.
+
+```text
+NATS Server
+     │
+     ├──── NATS Server
+     │
+     └──── NATS Server
+```
+
+The cluster provides the server topology required for distributed NATS operation.
+
+## JetStream Replication
+
+JetStream uses multiple servers to maintain replicated Stream state.
+
+```text
+NATS Cluster
+     │
+     └── JetStream
+           │
+           └── Stream
+                ├── Replica
+                ├── Replica
+                └── Replica
+```
+
+Therefore:
+
+> A NATS cluster provides the server topology; JetStream replication determines how a particular Stream is replicated across that topology.
+
+---
+
+# 18. Storage vs Replication vs Backup
+
+These three mechanisms solve different problems.
+
+| Mechanism      | Primary Purpose                     |
+| -------------- | ----------------------------------- |
+| File storage   | Persistence on the local server     |
+| Memory storage | Fast, non-durable storage           |
+| Replication    | Availability and failure tolerance  |
+| Backup         | Recovery from data loss or disaster |
 
 For example:
 
 ```text
-Server Failure
-      ↓
+File Storage
+     │
+     ▼
+Persistent local data
+
 Replication
+     │
+     ▼
+Multiple NATS servers
 
-
-Data Corruption / Disaster
-      ↓
-Backup / Restore
+Backup
+     │
+     ▼
+Independent recovery copy
 ```
 
-Replication should not be considered a substitute for an independent backup strategy.
+Replication should therefore **not** be treated as a replacement for backup.
+
+If data is intentionally deleted or purged, replication will generally replicate the resulting state rather than provide an independent historical copy.
 
 ---
 
-# 22. Backup and Restore
+# 19. Backup and Restore
 
-JetStream supports Stream snapshot and restore capabilities.
+JetStream supports snapshot-based backup and restore mechanisms.
 
-Conceptually:
+The conceptual model is:
+
+```text
+JetStream Stream
+       │
+       ▼
+   Snapshot
+       │
+       ▼
+Backup Storage
+       │
+       ▼
+     Restore
+       │
+       ▼
+JetStream Stream
+```
+
+Backup is intended to provide an independent recovery mechanism.
+
+---
+
+## 19.1 Object Storage
+
+For larger deployments, object storage can be used as an external durability layer for backup workflows.
+
+Examples include:
+
+* Amazon S3
+* Google Cloud Storage
+* S3-compatible object stores
+
+This introduces a separation between:
+
+```text
+Operational storage
+        │
+        ▼
+JetStream local storage
+
+and
+
+Recovery storage
+        │
+        ▼
+Object storage
+```
+
+Object storage should therefore be considered a **backup/recovery mechanism**, not simply another Stream replica.
+
+---
+
+# 20. Stream Observability
+
+A Stream should be monitored across several dimensions.
+
+## 20.1 Message State
+
+Important indicators include:
+
+* Number of stored messages
+* First sequence
+* Last sequence
+* Number of subjects
+* Number of consumers
+* Message age
+* Stream state
+
+These provide visibility into the logical state of the Stream.
+
+---
+
+## 20.2 Storage Consumption
+
+Storage-related metrics should include:
+
+* Bytes stored
+* Storage growth rate
+* Disk utilisation
+* Memory utilisation for memory-backed Streams
+* Storage capacity remaining
+
+A Stream may be logically healthy while the underlying storage infrastructure approaches capacity.
+
+---
+
+## 20.3 Replication Health
+
+For replicated Streams, monitor:
+
+* Replica count
+* Replica availability
+* Leader state
+* Replication lag/state
+* Quorum availability
+* Server health
+
+The important architectural question is not merely:
+
+> "Are there three replicas configured?"
+
+but:
+
+> "Are the required replicas healthy and is quorum currently available?"
+
+---
+
+# 21. Capacity Management
+
+Capacity should be evaluated at multiple levels.
 
 ```text
 Stream
-   |
-   | Snapshot
-   v
-Backup Artifact
-   |
-   | Restore
-   v
-Restored Stream
+  │
+  ├── Message count
+  ├── Message size
+  ├── Byte limit
+  ├── Age
+  └── Subject distribution
+        │
+        ▼
+NATS Server
+  │
+  ├── CPU
+  ├── Memory
+  ├── Disk
+  └── Network
+        │
+        ▼
+Infrastructure
 ```
 
-Backup/restore can support scenarios such as:
+A Stream limit and infrastructure capacity are therefore separate concerns.
 
-* Disaster recovery
-* Data recovery
-* Environment migration
-* Operational recovery
+For example:
 
-The backup lifecycle should be managed independently from the operational Stream replication topology.
+```text
+max_bytes = 100 GB
+```
+
+does not imply that the server should necessarily have exactly 100 GB of available disk.
+
+Operational overhead, other Streams, replication, filesystem requirements, and infrastructure headroom must also be considered.
 
 ---
 
-# 23. Object Storage and S3
+# 22. Stream Organisation and Separation
 
-Object storage can be incorporated into a backup architecture where supported by the selected NATS backup mechanism and operational tooling.
+A key architectural decision is determining when multiple subjects should belong to the same Stream versus separate Streams.
 
-A conceptual architecture is:
+## 22.1 Multiple Subjects in One Stream
 
-```text
-JetStream
-    |
- Snapshot / Backup
-    |
-    v
-Object Storage
-    |
-    +-- S3
-    +-- S3-compatible storage
-    +-- Other supported object storage
-```
+Multiple subjects can share a Stream when they have compatible:
 
-Object storage should be considered a **backup/recovery target**, not automatically as a replacement for JetStream's normal operational file storage.
-
-The exact S3/object-storage workflow should be validated against the deployed NATS Server version and selected backup implementation.
-
----
-
-# 24. Stream Observability
-
-Stream observability should provide visibility into:
-
-### Stream Health
-
-* Stream state
-* Operational errors
-* Availability
-
-### Resource Consumption
-
-* Stored messages
-* Stored bytes
-* Storage utilization
-
-### Message State
-
-* First Sequence
-* Last Sequence
-* Message age
-* Message growth rate
-
-### Replication
-
-* Replica state
-* Leader state
-* Quorum
-* Replica availability
-
-### Infrastructure
-
-* CPU
-* Memory
-* Disk capacity
-* Disk I/O
-* Network utilization
-
----
-
-# 25. Capacity Monitoring
-
-Capacity should be evaluated at two levels.
-
-## Stream-Level Capacity
-
-Configured constraints:
-
-```text
-max_msgs
-max_bytes
-max_age
-max_msg_size
-```
-
-## Infrastructure-Level Capacity
-
-Underlying resources:
-
-```text
-CPU
-Memory
-Disk
-Disk I/O
-Network
-```
-
-A Stream approaching `max_msgs` does not necessarily mean infrastructure is overloaded. It may simply indicate that the configured retention policy is being enforced.
-
-Conversely, increasing Stream limits without evaluating available disk capacity can create infrastructure risk.
-
----
-
-# 26. Overload Detection
-
-Potential indicators include:
-
-* Rapid storage growth
-* Increasing message rate
-* Disk capacity approaching threshold
-* High disk I/O
-* CPU or memory pressure
-* Replication overhead
-* Increasing number of Streams
-* Sustained increase in retained data
-
-Monitoring should distinguish between:
-
-```text
-Expected retention behavior
-```
-
-and:
-
-```text
-Infrastructure capacity exhaustion
-```
-
----
-
-# 27. Adding a Subject vs Creating a Stream
-
-The decision should be based on **shared lifecycle and operational requirements**, rather than simply event naming.
-
-## Add a Subject to Existing Stream
-
-Consider adding a subject when the new event shares:
-
-* Retention policy
-* Storage type
+* Retention requirements
+* Storage requirements
 * Replication requirements
-* Backup policy
 * Lifecycle
-* Ownership
+* Operational ownership
 * Capacity characteristics
 
 Example:
+
+```text
+ORDER_EVENTS
+
+order.created
+order.placed
+order.cancelled
+```
+
+These may naturally represent one event domain.
+
+---
+
+## 22.2 Separate Streams
+
+Separate Streams become appropriate when the underlying requirements differ materially.
+
+Examples:
+
+### Different retention
+
+```text
+ORDER_EVENTS
+    30 days
+
+AUDIT_EVENTS
+    7 years
+```
+
+These should generally not share the same Stream.
+
+### Different storage characteristics
+
+```text
+Operational events → high-volume file storage
+
+Transient events → memory storage
+```
+
+### Different replication requirements
+
+```text
+Normal events → 1 replica
+
+Critical financial events → 3 replicas
+```
+
+### Different operational ownership
+
+If two message domains have different lifecycle or operational ownership, separate Streams can provide clearer administrative boundaries.
+
+---
+
+# 23. Stream Separation Decision Criteria
+
+The following decision model can be used when determining Stream boundaries.
+
+| Criterion                         | Same Stream | Separate Stream |
+| --------------------------------- | ----------- | --------------- |
+| Same retention                    | ✓           |                 |
+| Different retention               |             | ✓               |
+| Same storage requirement          | ✓           |                 |
+| Different storage requirement     |             | ✓               |
+| Same replication requirement      | ✓           |                 |
+| Different replication requirement |             | ✓               |
+| Same lifecycle                    | ✓           |                 |
+| Independent lifecycle             |             | ✓               |
+| Same operational ownership        | ✓           |                 |
+| Different ownership               |             | ✓               |
+| Similar capacity characteristics  | ✓           |                 |
+| Significantly different capacity  |             | ✓               |
+| Same event domain                 | ✓           |                 |
+| Different event domains           |             | Often ✓         |
+
+The objective is not to minimise the number of Streams.
+
+The objective is to establish **coherent storage and lifecycle boundaries**.
+
+---
+
+# 24. Stream vs Subject
+
+A subject and a Stream operate at different abstraction levels.
+
+```text
+Subject
+  =
+Messaging namespace
+
+Stream
+  =
+Durable storage boundary
+```
+
+For example:
 
 ```text
 order.created
@@ -992,270 +1317,319 @@ order.placed
 order.cancelled
 ```
 
-can share:
+are subjects.
+
+A Stream such as:
 
 ```text
-EVENTS
-  └── order.*
+ORDER_EVENTS
 ```
 
-when their operational requirements are aligned.
+can capture all three.
+
+Therefore, adding a new subject does not necessarily require creating a new Stream.
+
+A new Stream should be considered when the new subject has materially different storage, retention, replication, lifecycle, or operational requirements.
 
 ---
 
-# 28. Creating a Separate Stream
+# 25. Stream Internals — Conceptual Message Path
 
-A separate Stream should be considered when there is a meaningful difference in one or more operational dimensions.
-
-### Retention
+A simplified message path is:
 
 ```text
-Orders       → 30 days
-Audit events → 1 year
+Publisher
+   │
+   ▼
+NATS subject
+   │
+   ▼
+Subject matching
+   │
+   ▼
+JetStream Stream
+   │
+   ├── Assign Stream Sequence
+   │
+   ├── Persist message
+   │
+   ├── Apply duplicate detection
+   │
+   ├── Apply retention constraints
+   │
+   └── Replicate if configured
+           │
+           ▼
+      Stored Stream State
 ```
 
-### Storage
+This is a conceptual model rather than an implementation-level representation of every internal operation.
 
-```text
-Critical events  → File
-Transient events → Memory
-```
-
-### Replication
-
-```text
-Critical events → 3 replicas
-Other events    → 1 replica
-```
-
-### Backup and Recovery
-
-Different recovery objectives can justify separate Streams.
-
-### Ownership
-
-Different operational owners can justify independent Stream boundaries.
-
-### Capacity
-
-Very high-volume subjects may warrant isolation from lower-volume event categories.
-
-The core principle is:
-
-> **A Stream should group subjects that share the same durability, lifecycle and operational requirements.**
+The important architectural point is that a Stream maintains state beyond the transient NATS message delivery path.
 
 ---
 
-# 29. Stream Design Decision Matrix
+# 26. Stream Data Lifecycle
 
-| Requirement                       | Same Stream | Separate Stream |
-| --------------------------------- | ----------- | --------------- |
-| Same retention                    | ✓           |                 |
-| Same storage                      | ✓           |                 |
-| Same replication                  | ✓           |                 |
-| Same backup policy                | ✓           |                 |
-| Same lifecycle                    | ✓           |                 |
-| Same ownership                    | ✓           |                 |
-| Significantly different volume    |             | ✓               |
-| Different retention               |             | ✓               |
-| Different storage                 |             | ✓               |
-| Different replication             |             | ✓               |
-| Different recovery requirements   |             | ✓               |
-| Independent operational ownership |             | ✓               |
-
-This should be treated as a design guideline rather than a strict technical rule.
-
----
-
-# 30. CLI Configuration Coverage
-
-The CLI should be used to validate the actual capabilities available in the deployed environment.
-
-Relevant commands include:
+A stored message can conceptually progress through:
 
 ```text
-nats stream --help
-nats stream add --help
-nats stream edit --help
-nats stream update --help
-nats stream info --help
-nats stream get --help
-nats stream msg --help
-nats stream purge --help
+Published
+    │
+    ▼
+Accepted by Stream
+    │
+    ▼
+Assigned Stream Sequence
+    │
+    ▼
+Stored
+    │
+    ├── Retained
+    │
+    ├── Replicated
+    │
+    ├── Deleted explicitly
+    │
+    ├── Purged
+    │
+    └── Expired by retention limits
+            │
+            ▼
+         Removed
 ```
 
-The configuration review should capture:
+This lifecycle explains why JetStream can function as both:
 
-* Supported fields
-* Allowed values
-* Defaults
-* Update behavior
-* CLI-specific limitations
-* Server-version dependencies
+* A durable messaging mechanism
+* A bounded event store
+
+depending on its configuration.
 
 ---
 
-# 31. Server and CLI Version Consideration
+# 27. Administrative Protection
 
-The demonstration environment currently uses:
+JetStream provides configuration controls to protect Stream data from administrative operations.
+
+Important controls include:
+
+### `deny_delete`
+
+Prevents individual message deletion.
+
+### `deny_purge`
+
+Prevents bulk Stream purge operations.
+
+### `sealed`
+
+Provides a terminal lifecycle state for the Stream.
+
+These controls are useful where accidental or unauthorised data removal is a concern.
+
+They should be considered part of the Stream's governance model rather than merely configuration options.
+
+---
+
+# 28. Version and API Considerations
+
+NATS Server and NATS CLI are independently versioned components.
+
+For example, an environment may have:
 
 ```text
-NATS Server : v2.14.6
-NATS CLI    : v0.4.0
+NATS Server
+v2.x
+
+NATS CLI
+v0.x
 ```
 
-The two components have independent versioning.
+The available CLI commands and exposed configuration options can therefore differ from the latest NATS documentation.
 
-Therefore:
+For architectural evaluation:
+
+1. The NATS Server/API version determines actual server capabilities.
+2. The NATS CLI version determines the CLI interface available to the operator.
+3. The deployed environment should be treated as the source of truth for supported operational commands.
+4. Official NATS documentation should be used as the authoritative reference for the corresponding server/API version.
+
+This distinction is particularly important when reviewing newer Stream configuration fields.
+
+---
+
+# 29. CLI Configuration Coverage
+
+The NATS CLI provides operational access to Stream lifecycle and management capabilities.
+
+Relevant conceptual operations include:
+
+| Operation          | Purpose                            |
+| ------------------ | ---------------------------------- |
+| Stream creation    | Establish a new Stream             |
+| Stream update      | Modify supported configuration     |
+| Stream information | Inspect Stream state               |
+| Message inspection | Inspect individual stored messages |
+| Message deletion   | Remove specific messages           |
+| Stream purge       | Remove groups of messages          |
+| Stream deletion    | Remove the Stream itself           |
+
+The CLI is an operational interface over the NATS/JetStream API. It should therefore not be treated as the definition of JetStream's complete conceptual model.
+
+The available options depend on the installed CLI version.
+
+---
+
+# 30. Architecture Considerations
+
+The following principles should guide Stream design.
+
+### 1. A Stream is a durable storage boundary
+
+Do not treat a Stream as merely a topic container.
+
+### 2. Subjects define message scope
+
+Subject patterns determine which messages enter the Stream.
+
+### 3. Retention defines lifecycle
+
+A Stream's retention configuration determines how long messages remain available.
+
+### 4. Storage and retention are independent
+
+File storage does not determine how long messages are retained.
+
+### 5. Replication is not backup
+
+Replication provides operational resilience; backup provides independent recovery.
+
+### 6. Replica count must match cluster topology
+
+Configuring three replicas requires suitable JetStream servers capable of hosting those replicas.
+
+### 7. Quorum matters
+
+A replicated Stream requires a healthy quorum for distributed operation.
+
+### 8. Stream boundaries should follow operational requirements
+
+Subjects with materially different retention, storage, replication, lifecycle, or ownership requirements should generally be separated.
+
+### 9. Limits should be intentional
+
+Unlimited message count, bytes, or age should be an explicit architectural decision rather than an accidental default.
+
+### 10. Observability must cover both logical and physical state
+
+A Stream can be logically healthy while its underlying disk, memory, network, or replica resources approach failure conditions.
+
+---
+
+# 31. Conceptual Summary
+
+The overall JetStream Stream model can be represented as:
 
 ```text
-Official NATS Documentation
-          |
-          v
-NATS Server API / Capabilities
-          |
-          v
-Installed NATS CLI
-          |
-          v
-Actual CLI Demonstration
+                         NATS
+                          │
+                     Subjects
+                          │
+                          ▼
+                    ┌───────────┐
+                    │  Stream   │
+                    └─────┬─────┘
+                          │
+             ┌────────────┼────────────┐
+             │            │            │
+             ▼            ▼            ▼
+         Retention     Storage      Sequences
+             │            │            │
+             │            │            │
+             ▼            ▼            ▼
+          Cleanup      Persistence   Ordering
+                          │
+                          ▼
+                     Replication
+                          │
+                          ▼
+                     NATS Cluster
+                          │
+                          ▼
+                      Quorum
+                          │
+                          ▼
+                 Operational Resilience
+
+                  Independent of:
+
+                     Backup
+                        │
+                        ▼
+                 Object Storage
 ```
 
-The deployed NATS Server determines the available JetStream server capabilities.
+The central architectural model is:
 
-The CLI determines how those capabilities can be administered from the command line.
+> **Subjects define what enters a Stream; the Stream defines how those messages are stored, retained, sequenced, and replicated.**
 
-Where differences exist, the deployed environment should be treated as the source of truth for the demonstration.
-
----
-
-# 32. Configuration Values Used for Review
-
-The current demonstration Stream uses:
-
-```json
-{
-  "name": "EVENTS",
-  "description": "Stream for storing orders related events",
-  "subjects": [
-    "order.*"
-  ],
-  "retention": "interest",
-  "max_consumers": -1,
-  "max_msgs_per_subject": -1,
-  "max_msgs": -1,
-  "max_bytes": -1,
-  "max_age": 0,
-  "max_msg_size": -1,
-  "storage": "memory",
-  "discard": "old",
-  "num_replicas": 1,
-  "duplicate_window": 120000000000,
-  "sealed": false,
-  "deny_delete": false,
-  "deny_purge": false,
-  "allow_rollup_hdrs": false,
-  "allow_direct": true,
-  "mirror_direct": false
-}
-```
-
-This configuration is intended for demonstrating Stream concepts and should not be interpreted as a production sizing recommendation.
+This distinction is fundamental when evaluating NATS JetStream as a durable messaging and event-storage capability.
 
 ---
 
-# 33. Architectural Summary
+# 32. References
 
-JetStream Streams provide a combination of:
+### NATS Documentation
 
-```text
-                 JetStream Stream
-                       |
-       +---------------+---------------+
-       |               |               |
-   Subject Scope    Persistence     Retention
-       |               |               |
-   order.*         File/Memory     Limits/Age
-       |                               |
-       +---------------+---------------+
-                       |
-                   Sequences
-                       |
-                 Message Lifecycle
-                       |
-                 +-----+-----+
-                 |           |
-             Replication   Backup
-                 |           |
-              Cluster     Recovery
-```
+[NATS Documentation](https://docs.nats.io/?utm_source=chatgpt.com)
 
-The Stream should be treated as a **durability and operational boundary**, not simply as a container for subjects.
+Primary documentation portal covering NATS concepts, JetStream, server configuration, APIs, operations, and reference material.
 
-The primary architecture decisions are:
+### JetStream Concepts
 
-1. Which subjects belong together
-2. How long messages need to be retained
-3. Where messages need to be stored
-4. How much data can be retained
-5. What failure tolerance is required
-6. What recovery mechanism is required
-7. How Stream health and capacity will be monitored
-8. Whether subjects require independent operational boundaries
+[JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream?utm_source=chatgpt.com)
 
----
+Conceptual reference for JetStream, including Streams and durable messaging.
 
-# 34. Key Architecture Principles
+### Stream API — Create
 
-### Principle 1 — Subject scope should follow lifecycle
+[JetStream Stream Create API](https://docs.nats.io/reference/reference-protocols/jetstream-api/streams/stream-create?utm_source=chatgpt.com)
 
-Subjects sharing the same lifecycle and operational requirements can generally share a Stream.
+Reference for Stream creation and Stream configuration fields.
 
-### Principle 2 — Storage is a durability decision
+### Stream API — Update
 
-Memory and File storage have fundamentally different persistence characteristics.
+[JetStream Stream Update API](https://docs.nats.io/reference/reference-protocols/jetstream-api/streams/stream-update?utm_source=chatgpt.com)
 
-### Principle 3 — Retention is a Stream policy
+Reference for Stream configuration updates and update semantics.
 
-Message cleanup can be automatic through limits or explicitly triggered through administrative operations.
+### JetStream Clustering and Replication
 
-### Principle 4 — Sequence numbers are Stream state
+[NATS JetStream Clustering](https://docs.nats.io/running-a-nats-service/configuration/clustering/jetstream_clustering?utm_source=chatgpt.com)
 
-Stream sequences provide ordered positions for messages and continue advancing even when individual messages are deleted.
+Reference for JetStream operation in clustered NATS environments and replicated Stream architecture.
 
-### Principle 5 — Replication is not backup
+### JetStream Persistence
 
-Replication protects against server failure; backup provides an independent recovery mechanism.
+[NATS JetStream Persistence](https://docs.nats.io/using-nats/jetstream/manage/storage?utm_source=chatgpt.com)
 
-### Principle 6 — Cluster and Stream replication are different
+Reference for JetStream storage and persistence behaviour.
 
-A NATS cluster provides the server topology. Stream configuration determines the replication of a particular Stream.
+### JetStream Snapshots
 
-### Principle 7 — Observability should drive Stream decisions
+[NATS JetStream Snapshots and Restore](https://docs.nats.io/using-nats/jetstream/manage/snapshots?utm_source=chatgpt.com)
 
-Metrics should be used to determine whether to:
+Reference for Stream snapshot and restoration capabilities.
 
-* Adjust Stream limits
-* Add subjects
-* Isolate workloads into new Streams
-* Scale infrastructure
+### NATS Monitoring
 
-### Principle 8 — Stream boundaries should be intentional
+[NATS Monitoring](https://docs.nats.io/running-a-nats-service/configuration/monitoring?utm_source=chatgpt.com)
 
-Separate Streams should be introduced when durability, retention, storage, replication, recovery, ownership or capacity requirements materially differ.
+Reference for NATS server monitoring and operational endpoints.
 
----
+### NATS CLI
 
-# 35. Scope Boundary
+[NATS CLI Repository](https://github.com/nats-io/natscli?utm_source=chatgpt.com)
 
-This document focuses on **JetStream Streams**.
-
-Consumer-specific behavior is intentionally outside the detailed scope of this review, including:
-
-* Durable consumer configuration
-* Delivery policies
-* Consumer acknowledgements
-* Redelivery
-* Consumer state management
-
-These topics should be covered separately when reviewing the consumer side of JetStream.
+Reference for the NATS command-line interface and its version-specific capabilities.
