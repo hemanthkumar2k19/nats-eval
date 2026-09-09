@@ -1,0 +1,43 @@
+services:
+
+  nats-1:
+    image: nats:latest
+    container_name: nats-1
+
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+    volumes:
+      - ./nats-1.conf:/etc/nats/nats.conf:ro
+      - ./data/nats-1:/data
+
+    command: ["-c", "/etc/nats/nats.conf"]
+
+  nats-2:
+    image: nats:latest
+    container_name: nats-2
+
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+
+    volumes:
+      - ./nats-2.conf:/etc/nats/nats.conf:ro
+      - ./data/nats-2:/data
+
+    command: ["-c", "/etc/nats/nats.conf"]
+
+  nats-3:
+    image: nats:latest
+    container_name: nats-3
+
+    ports:
+      - "4224:4222"
+      - "8224:8222"
+
+    volumes:
+      - ./nats-3.conf:/etc/nats/nats.conf:ro
+      - ./data/nats-3:/data
+
+    command: ["-c", "/etc/nats/nats.conf"]
