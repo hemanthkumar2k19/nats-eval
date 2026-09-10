@@ -1,7 +1,6 @@
 # Layer 2
 
 # Streams
-
 1. Lifecycle
     - Creation
     - Update

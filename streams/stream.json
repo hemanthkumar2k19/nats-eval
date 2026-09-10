@@ -1,27 +1,21 @@
 {
   "name": "EVENTS",
   "description": "Stream for storing orders and payments related events",
-
   "subjects": [
     "order.*",
     "payment.*"
   ],
-
   "retention": "limits",
-
   "max_consumers": -1,
   "max_msgs_per_subject": -1,
   "max_msgs": -1,
   "max_bytes": -1,
   "max_age": 0,
   "max_msg_size": -1,
-
   "storage": "file",
   "discard": "old",
-  "num_replicas": 1,
-
+  "num_replicas": 3,
   "duplicate_window": 120000000000,
-
   "sealed": false,
   "deny_delete": false,
   "deny_purge": false,

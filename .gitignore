@@ -47,3 +47,6 @@ tmp/
 # Custom
 feature.md 
 fix.md 
+
+# Stream backup
+backups/

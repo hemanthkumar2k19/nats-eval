@@ -1,26 +1,20 @@
 {
   "name": "EVENTS",
   "description": "Stream for storing ordersrelated events",
-
   "subjects": [
     "order.*"
   ],
-
-  "retention": "interest",
-
+  "retention": "limits",
   "max_consumers": -1,
   "max_msgs_per_subject": -1,
   "max_msgs": -1,
   "max_bytes": -1,
   "max_age": 0,
   "max_msg_size": -1,
-
-  "storage": "memory",
+  "storage": "file",
   "discard": "old",
-  "num_replicas": 3,
-
+  "num_replicas": 2,
   "duplicate_window": 120000000000,
-
   "sealed": false,
   "deny_delete": false,
   "deny_purge": false,
