@@ -17,7 +17,7 @@
 
   "storage": "memory",
   "discard": "old",
-  "num_replicas": 1,
+  "num_replicas": 3,
 
   "duplicate_window": 120000000000,
 
