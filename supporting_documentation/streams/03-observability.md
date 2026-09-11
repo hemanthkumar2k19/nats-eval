@@ -1,6 +1,8 @@
-# Stream Observability
+# Scope
 
-## 1. Overview and Telemetry Architecture
+This document details the telemetry architecture, monitoring primitives, health indicators, resource consumption metrics, overload conditions, replication status, and hands-on observability workflows for NATS JetStream streams.
+
+## 1. Observability Architecture & Primitives
 
 Stream Observability in NATS JetStream focuses specifically on monitoring the state, performance, health, data lifecycle, and message flows of JetStream streams and consumers. While NATS server handles core message routing and storage, stream observability requires tracking stream-level metrics, stream advisory events, storage logs, and application-level trace propagation across message boundaries.
 
@@ -75,7 +77,9 @@ In our reference environment (`deploy/local-nats-cluster`), stream telemetry is 
 
 ---
 
-## 2. Health
+## 2. Stream Metrics & Monitoring Standards
+
+### 2.1 Health
 
 Health monitoring confirms process vitality, server responsiveness, HTTP API health, and consensus engine stability across all cluster nodes.
 
@@ -89,7 +93,7 @@ Health monitoring confirms process vitality, server responsiveness, HTTP API hea
 
 ---
 
-## 3. Resource Consumption
+### 2.2 Resource Consumption
 
 Resource consumption telemetry monitors memory, CPU, disk storage, file descriptors, and network bandwidth utilization across NATS Core and JetStream streams.
 
@@ -105,7 +109,7 @@ Resource consumption telemetry monitors memory, CPU, disk storage, file descript
 
 ---
 
-## 4. Overload Conditions
+### 2.3 Overload Conditions
 
 Overload observability identifies message backpressure, client buffer overflows, slow consumers, message drop policies, expired acknowledgements, and message redeliveries.
 
@@ -121,7 +125,7 @@ Overload observability identifies message backpressure, client buffer overflows,
 
 ---
 
-## 5. Replication Status
+### 2.4 Replication Status
 
 Replication status telemetry tracks Raft consensus stability, stream leader placement, peer catch-up sequence lag, and cluster quorum health across multi-replica streams ($R > 1$).
 
@@ -135,6 +139,69 @@ Replication status telemetry tracks Raft consensus stability, stream leader plac
 
 ---
 
-## 6. Capacity Thresholds
+### 2.5 Capacity Thresholds
 
-## 7. Reactive Approach on New Subject, Stream, and Infrastructure
+### 2.6 Reactive Approach on New Subject, Stream, and Infrastructure
+
+---
+
+## 3. Hands-On CLI & Observability Demonstrations
+
+### 3.1 Inspecting Stream Monitoring Endpoints (`/jsz`)
+
+1. Setting up:
+```bash
+# Ensure local NATS cluster is running and EVENTS stream is created
+nats stream add EVENTS \
+  --subjects="order.*","payment.*" \
+  --storage=file \
+  --force
+```
+
+2. Simulating the Behaviour:
+```bash
+# Publish test messages to populate stream telemetry
+nats pub order.placed --count=5 "Order Event Payload {{Count}}"
+```
+
+3. Checking the behaviour and working:
+```bash
+# Query HTTP monitoring endpoints directly for stream metrics
+curl -s "http://localhost:8222/jsz?streams=true" | jq .
+curl -s "http://localhost:8222/jsz?consumers=true" | jq .
+```
+
+### 3.2 Subscribing to Stream Advisory Events (`$SYS.EVENT.ADVISORY.>`)
+
+1. Setting up:
+Open a terminal listener on system advisory subjects:
+```bash
+nats sub "\$SYS.EVENT.ADVISORY.STREAM.>"
+```
+
+2. Simulating the Behaviour:
+In a separate terminal, trigger stream creation and deletion events:
+```bash
+nats stream add TEST_ADVISORY --subjects="advisory.test" --storage=memory --force
+nats stream rm TEST_ADVISORY -f
+```
+
+3. Checking the behaviour and working:
+Verify that structured JSON advisories (`CREATED`, `DELETED`) are emitted and received in real-time.
+
+### 3.3 Querying Stream Telemetry via Prometheus Exporter
+
+1. Setting up:
+Ensure `prometheus-nats-exporter` is running on port 7777.
+
+2. Simulating the Behaviour:
+```bash
+# Generate workload traffic on EVENTS stream
+nats pub order.created "Telemetry Test Payload"
+```
+
+3. Checking the behaviour and working:
+```bash
+# Query scraped Prometheus metrics for stream byte footprint and message counts
+curl -s "http://localhost:7777/metrics" | grep gnatsd_jsz_stream
+```
