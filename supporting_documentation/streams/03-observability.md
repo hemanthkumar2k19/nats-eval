@@ -94,7 +94,7 @@ Health monitoring confirms process vitality, server responsiveness, HTTP API hea
 
 | Metric / Advisory / Parameter | Description | Prometheus Exporter / Event | Link to Check (Browser URL) | Justification & Operational Value |
 | :--- | :--- | :--- | :--- | :--- |
-| **Process Liveness** | Binary health indicator for server vitality | HTTP probe (`200 OK`) | [http://localhost:8222/healthz?jsz=true](http://localhost:8222/healthz?jsz=true) | Validates that both NATS core and JetStream engine are active for container probes and load balancers. |
+| **Process Liveness** | Binary health indicator for server vitality | `gnatsd_healthz_status or gnatsd_up` | [http://localhost:8222/healthz?jsz=true](http://localhost:8222/healthz?jsz=true) | Validates that both NATS core and JetStream engine are active for container probes and load balancers. |
 | **Server Uptime** | Runtime of server process in seconds | `gnatsd_varz_uptime` | [http://localhost:8222/varz](http://localhost:8222/varz) | Tracks process running duration; sudden drops alert on silent container restarts or crashes. |
 | **Meta Leader Status** | Active leader node for JetStream Meta cluster | `gnatsd_jsz_meta_cluster_leader` | [http://localhost:8222/jsz](http://localhost:8222/jsz) | JetStream stream/consumer creation requires an active Meta Leader; if 0 across all nodes, admin APIs fail. |
 | **Meta Peer Health** | Connectivity status of Meta Raft cluster peers | `gnatsd_jsz_meta_cluster_peer_healthy` | [http://localhost:8222/jsz](http://localhost:8222/jsz) | Monitors Raft peer health within the control plane to detect cluster network partitions early. |
@@ -113,6 +113,8 @@ Resource consumption telemetry monitors memory, CPU, disk storage, file descript
 | **JetStream RAM Storage** | Bytes consumed vs reserved for memory streams | `gnatsd_jsz_memory_used_bytes` | [http://localhost:8222/jsz?accounts=true](http://localhost:8222/jsz?accounts=true) | Tracks RAM usage of `Storage: Memory` streams against account quotas to prevent memory limit rejection. |
 | **JetStream Disk Storage** | Bytes consumed vs reserved for disk streams | `gnatsd_jsz_storage_used_bytes` | [http://localhost:8222/jsz?accounts=true](http://localhost:8222/jsz?accounts=true) | Monitors disk usage for `Storage: File` streams to avoid disk space exhaustion and write blocks. |
 | **Per-Stream Footprint** | Storage bytes occupied per individual stream | `gnatsd_jsz_stream_bytes` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Measures storage per stream to validate and tune retention policies (`MaxBytes`, `MaxAge`). |
+| **Per-Stream Message Count** | Total message count stored in stream | `gnatsd_jsz_stream_messages` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Tracks stored volume per stream for retention auditing and growth monitoring. |
+| **Per-Stream Consumer Count** | Active consumers bound to stream | `gnatsd_jsz_stream_consumers` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Monitors consumer attached density per stream to ensure expected worker attachment. |
 | **Open File Descriptors** | Open sockets and file handles held by process | `gnatsd_varz_open_files` | [http://localhost:8222/varz](http://localhost:8222/varz) | Monitors open file handles to prevent breaching operating system limits (`ulimit -n`). |
 | **Network Throughput** | Raw ingress and egress byte and message rates | `gnatsd_varz_in_bytes`, `gnatsd_varz_out_bytes` | [http://localhost:8222/varz](http://localhost:8222/varz) | Captures network I/O traffic rates to identify network bandwidth saturation. |
 
@@ -144,7 +146,7 @@ Replication status telemetry tracks Raft consensus stability, stream leader plac
 | **Replica Sequence Lag** | Message sequence delta between follower and leader | `gnatsd_jsz_stream_cluster_peer_lag` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Measures sequence gap on followers; high lag warns of disk I/O bottlenecks or network partition. |
 | **Replica Active Delta** | Nanoseconds since last Raft heartbeat from peer | `gnatsd_jsz_stream_cluster_peer_active` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Tracks peer responsiveness; high deltas precede follower disconnection and election triggers. |
 | **Quorum Lost Advisory** | Event fired when stream Raft quorum is lost | `$SYS.EVENT.ADVISORY.STREAM.QUORUM_LOST.>` | [http://localhost:8222/jsz?streams=true](http://localhost:8222/jsz?streams=true) | Real-time event when Raft quorum ($R/2 + 1$) drops, halting writes to ensure data consistency. |
-| **Leader Re-elections** | Raft term changes and leader election transitions | Server storage logs (Fluent Bit -> Loki) | [http://localhost:3000](http://localhost:3000) | Log stream monitoring in Grafana Loki to detect flapping nodes or unstable cluster topology. |
+| **Leader Re-elections & Server Logs** | Raft term changes, leader elections, and server events | Server engine log stream (Fluent Bit $\rightarrow$ Loki) | [http://localhost:3000](http://localhost:3000) | Log stream monitoring in Grafana Loki panel (`JetStream Raft & Server Engine Logs`) to inspect flapping nodes or storage warnings. |
 
 ---
 
@@ -164,6 +166,7 @@ Replication status telemetry tracks Raft consensus stability, stream leader plac
 nats stream add EVENTS \
   --subjects="order.*","payment.*" \
   --storage=file \
+  --replicas=3 \
   --force
 ```
 
@@ -213,4 +216,57 @@ nats pub order.created "Telemetry Test Payload"
 ```bash
 # Query scraped Prometheus metrics for stream byte footprint and message counts
 curl -s "http://localhost:7777/metrics" | grep gnatsd_jsz_stream
+```
+
+### 3.4 Benchmark Workload Generation & Dashboard Verification (`nats bench`)
+
+Use `nats bench` and targeted NATS CLI operations to generate workload traffic across all tiles in the Grafana Stream Observability dashboard ([http://localhost:3000](http://localhost:3000)).
+
+1. Setting up:
+```bash
+# Create a 3-replica clustered stream using standard order.* and payment.* subjects
+nats stream add EVENTS \
+  --subjects="order.*","payment.*" \
+  --storage=file \
+  --replicas=3 \
+  --force
+
+# Create a pull consumer for pending backlog and ACK tracking
+nats consumer add EVENTS WORKER \
+  --pull \
+  --ack explicit \
+  --ack-wait=5s \
+  --max-deliver=3 \
+  --max-pending=1000 \
+  --force
+```
+
+2. Simulating the Behaviour:
+```bash
+# 1. High-throughput benchmark workload (Populates CPU, Memory, Network I/O, Stream Bytes, Stream Messages)
+nats bench pub order.placed --clients=2 --msgs=10000 --size=256
+
+# 2. Populate Pending Backlog & Pending ACKs in Grafana
+nats pub order.placed --count=500 "Backlog Payload {{Count}}"
+
+# Fetch unacknowledged messages to generate In-Flight Pending ACKs and trigger redelivery rate
+nats consumer next EVENTS WORKER --count=50 --no-ack
+
+# 3. Simulate Storage Quota Limit Breaches (Populates Account Limit Error Events)
+nats stream add QUOTA_STREAM --subjects="payment.quota" --max-bytes=10000 --discard=new --storage=file --force
+nats pub payment.quota --count=100 --size=1024 "Quota Exhaustion Payload"
+
+# 4. Generate Management API Traffic & Engine Logs
+nats stream ls
+nats stream info EVENTS
+```
+
+3. Checking the behaviour and working:
+```bash
+# Verify Grafana Dashboard view at http://localhost:3000 (User: admin / Password: admin)
+# Observe data points across all tiles:
+# - Row 1: Exporter & Healthz Liveness, Uptime, Meta Leader, Meta Peer Healthy, API Traffic & Errors
+# - Row 2: CPU %, Memory RSS, Stream Bytes, Stream Message Count, Stream Consumer Count, Open Files, Ingress/Egress Rate
+# - Row 3: Consumer Pending Messages, In-Flight Pending ACKs, Message Redeliveries, Storage Limit Error Events
+# - Row 4: Stream Raft Leaders, Replica Lag, Replica Heartbeat Delta, JetStream Raft & Engine Logs (Loki)
 ```

@@ -29,9 +29,9 @@
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "id": 2,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "Exporter Liveness",
+      "title": "Exporter & Healthz Liveness",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "gnatsd_up or up", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "gnatsd_healthz_status or gnatsd_up or up", "refId": "A" }]
     },
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -174,8 +174,28 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "short" } },
+      "fieldConfig": { "defaults": { "unit": "short" } },
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
+      "id": 25,
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Stream Message Count",
+      "type": "bargauge",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "gnatsd_jsz_stream_messages or vector(0)", "legendFormat": "{{stream}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "id": 26,
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "Stream Consumer Count",
+      "type": "bargauge",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "gnatsd_jsz_stream_consumers or vector(0)", "legendFormat": "{{stream}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "short" } },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
       "id": 13,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Open File Descriptors",
@@ -185,7 +205,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "Bps" } },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
       "id": 14,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Network Ingress / Egress Rate",
@@ -198,7 +218,7 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
       "id": 15,
       "title": "3. Overload Conditions",
       "type": "row"
@@ -211,7 +231,7 @@
           "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
         }
       },
-      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 19 },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 25 },
       "id": 16,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "title": "Slow Core Consumers",
@@ -221,7 +241,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "short" } },
-      "gridPos": { "h": 5, "w": 7, "x": 4, "y": 19 },
+      "gridPos": { "h": 5, "w": 7, "x": 4, "y": 25 },
       "id": 17,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Consumer Pending Messages",
@@ -231,7 +251,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "short" } },
-      "gridPos": { "h": 5, "w": 7, "x": 11, "y": 19 },
+      "gridPos": { "h": 5, "w": 7, "x": 11, "y": 25 },
       "id": 18,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "In-Flight Pending ACKs",
@@ -241,7 +261,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "ops" } },
-      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 19 },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 25 },
       "id": 19,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Message Redelivery Rate",
@@ -256,7 +276,7 @@
           "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
         }
       },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 30 },
       "id": 20,
       "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "title": "Account Storage Limit Error Events",
@@ -266,15 +286,15 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
       "id": 21,
-      "title": "4. Replication Status",
+      "title": "4. Replication Status & Engine Logs",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": {} },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 29 },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 35 },
       "id": 22,
       "options": { "footer": { "show": false }, "showHeader": true },
       "title": "Stream Raft Leaders",
@@ -284,7 +304,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "short" } },
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 29 },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 35 },
       "id": 23,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Replica Sequence Lag",
@@ -294,12 +314,21 @@
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line" }, "unit": "s" } },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 29 },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 35 },
       "id": 24,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "title": "Replica Active Heartbeat Delta",
       "type": "timeseries",
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "(gnatsd_jsz_stream_cluster_peer_active / 1e9) or vector(0)", "legendFormat": "{{stream}} peer {{peer}} active delta (s)", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 41 },
+      "id": 27,
+      "options": { "enableLogDetails": true, "showLabels": true, "showTime": true, "wrapLogMessage": true },
+      "title": "JetStream Raft & Server Engine Logs",
+      "type": "logs",
+      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "{job=\"nats-cluster\"}", "refId": "A" }]
     }
   ],
   "refresh": "5s",

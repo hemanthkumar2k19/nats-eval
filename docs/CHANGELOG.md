@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-09-11] - Grafana Dashboard Expansion & Observability Benchmark Testing
+
+### Added
+- Expanded [`deploy/local-nats-cluster/stream-dashboard.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/stream-dashboard.json) to incorporate `gnatsd_jsz_stream_messages` (Stream Message Count panel) and `gnatsd_jsz_stream_consumers` (Stream Consumer Count panel).
+- Added direct NATS HTTP `/healthz` liveness probe integration (`gnatsd_healthz_status or gnatsd_up or up`) to Panel 2 in [`deploy/local-nats-cluster/stream-dashboard.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/stream-dashboard.json).
+- Integrated a dedicated Grafana Loki logs panel (`JetStream Raft & Server Engine Logs`) into Row 4 of [`deploy/local-nats-cluster/stream-dashboard.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/stream-dashboard.json) for real-time visualization of NATS server logs, Raft leader transitions, and storage warnings.
+- Added Section 3.4 (**Benchmark Workload Generation & Dashboard Verification**) in [`supporting_documentation/streams/03-observability.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/03-observability.md) detailing concise `nats bench` and NATS CLI workload commands to populate data points across all Grafana dashboard tiles.
+
 ## [2026-09-11] - Stream Documentation Reorganization & Numbering Alignment
 
 ### Added
