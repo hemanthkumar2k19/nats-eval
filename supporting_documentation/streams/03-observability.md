@@ -44,35 +44,44 @@ Log forwarders (e.g. Fluent Bit) tail server log files and push stream engine lo
 
 In our reference environment (`deploy/local-nats-cluster`), stream telemetry is aggregated as follows:
 
-```
-+-----------------------------------------------------------------------------------+
-|                            Local NATS Cluster (3 Nodes)                           |
-|  [ nats-1:8222 ]            [ nats-2:8223 ]            [ nats-3:8224 ]          |
-|  - JetStream Streams & Raft - JetStream Streams & Raft - JetStream Streams & Raft |
-|  - Writes /data/nats.log    - Writes /data/nats.log    - Writes /data/nats.log  |
-+----------------------+----------------------+----------------------+--------------+
-                       |                      |                      |
-                       v                      v                      v
-             +---------------------------------------------------------------+
-             |                prometheus-nats-exporter (:7777)               |
-             |  Scrapes stream stats (/jsz=all) & server engine endpoints    |
-             +-------------------------------+-------------------------------+
-                                             |
-                                             v
-+-----------------------+                    |
-|      fluent-bit       |                    |
-| Tails /data/*/nats.log|                    |
-+-----------+-----------+                    |
-            | (Loki logs)                    | (Prometheus stream metrics)
-            v                                v
-+-----------------------------------------------------------------------------------+
-|                        grafana/otel-lgtm Stack Container                          |
-|  - Prometheus/Mimir (:9090)  - Loki (:3100)  - Tempo (:4317/4318) - Grafana (:3000)|
-+-----------------------------------------------------------------------------------+
+```mermaid
+graph TD
+    subgraph Cluster["Local NATS Cluster (3 Nodes)"]
+        N1["nats-1:8222<br/>(JetStream & Raft)"]
+        N2["nats-2:8223<br/>(JetStream & Raft)"]
+        N3["nats-3:8224<br/>(JetStream & Raft)"]
+    end
+
+    subgraph Collection["Telemetry Aggregation Layer"]
+        Exporter["prometheus-nats-exporter (:7777)<br/>(Scrapes /jsz=all across nodes)"]
+        FluentBit["fluent-bit<br/>(Tails /logs/nats-*/nats.log across all 3 nodes)"]
+    end
+
+    subgraph Stack["grafana/otel-lgtm Stack Container"]
+        Prometheus["Prometheus / Mimir (:9090)"]
+        Loki["Loki Engine Logs (:3100)"]
+        Tempo["Tempo Traces (:4317/4318)"]
+        Grafana["Grafana Dashboards (:3000)"]
+    end
+
+    N1 -->|"HTTP Metrics (/jsz)"| Exporter
+    N2 -->|"HTTP Metrics (/jsz)"| Exporter
+    N3 -->|"HTTP Metrics (/jsz)"| Exporter
+
+    N1 -->|"Log Files (/logs/nats-1/)"| FluentBit
+    N2 -->|"Log Files (/logs/nats-2/)"| FluentBit
+    N3 -->|"Log Files (/logs/nats-3/)"| FluentBit
+
+    Exporter -->|"Prometheus Stream Metrics"| Prometheus
+    FluentBit -->|"Loki Logs"| Loki
+
+    Prometheus --> Grafana
+    Loki --> Grafana
+    Tempo --> Grafana
 ```
 
-- **Stream Metrics**: `prometheus-nats-exporter` scrapes JetStream endpoints (`/jsz=all`) across all 3 nodes and feeds Prometheus inside `otel-lgtm`.
-- **Stream Engine Logs**: `fluent-bit` tails server log files from `/data/nats-*/nats.log` into Loki inside `otel-lgtm`.
+- **Stream Metrics**: `prometheus-nats-exporter` scrapes HTTP monitoring endpoints (`/jsz=all`) across all 3 nodes (`nats-1:8222`, `nats-2:8223`, `nats-3:8224`) and feeds Prometheus inside `otel-lgtm`.
+- **Stream Engine Logs**: `fluent-bit` tails server log files directly from all 3 nodes (`/logs/nats-*/nats.log`) and pushes log streams into Loki inside `otel-lgtm`.
 - **Grafana Stream Dashboard**: Grafana automatically loads [`deploy/local-nats-cluster/stream-dashboard.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/stream-dashboard.json) on startup via provisioning rules in [`grafana-dashboards.yml`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/grafana-dashboards.yml).
 
 ---
