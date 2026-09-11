@@ -41,3 +41,57 @@ services:
       - ./data/nats-3:/data
 
     command: ["-c", "/etc/nats/nats.conf"]
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    container_name: nats-exporter
+    ports:
+      - "7777:7777"
+    command:
+      - "-healthz"
+      - "-varz"
+      - "-jsz=all"
+      - "http://nats-1:8222"
+      - "http://nats-2:8222"
+      - "http://nats-3:8222"
+    depends_on:
+      - nats-1
+      - nats-2
+      - nats-3
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    container_name: otel-lgtm
+    ports:
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+      - "9090:9090"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./prometheus.yml:/otel-lgtm/prometheus.yaml:ro
+      - ./grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/nats.yaml:ro
+      - ./stream-dashboard.json:/etc/grafana/provisioning/dashboards/nats/stream-dashboard.json:ro
+      - ./stream-dashboard.json:/otel-lgtm/grafana-dashboard-definitions/stream-dashboard.json:ro
+      - ./stream-dashboard.json:/otel-lgtm/grafana-dashboard-definitions/0/stream-dashboard.json:ro
+      - ./stream-dashboard.json:/grafana-dashboard-definitions/stream-dashboard.json:ro
+
+
+
+    depends_on:
+      - nats-exporter
+
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+    container_name: fluent-bit
+    volumes:
+      - ./data:/logs:ro
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+    depends_on:
+      - nats-1
+      - nats-2
+      - nats-3
+      - otel-lgtm

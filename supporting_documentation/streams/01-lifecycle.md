@@ -1,14 +1,14 @@
 # Scope
 
-This document details the operational lifecycle of NATS JetStream streams, including creation, updates, sequence state management, retention, and purging mechanisms.
+This document details the operational lifecycle of NATS JetStream streams, including creation, updates, sequence state management, and stream division criteria.
 
-## Lifecycle
+## 1. Lifecycle Concepts
 
-### Creation
+### 1.1 Creation
 
 Stream creation initializes the JetStream storage layer, setting the subject bounds, storage backend, replication topology, retention rules, and administrative controls for messages.
 
-#### Stream Configuration Reference
+#### 1.1.1 Stream Configuration Reference
 
 Below are the stream configuration options that can be defined:
 
@@ -52,11 +52,90 @@ Below are the stream configuration options that can be defined:
 | **AllowMsgCounter** | If set, the stream will function as a counter stream, hosting distributed counter CRDTs. | 2.12.0 | No |
 | **AllowMsgSchedules** | If set, allows message scheduling in the stream. | 2.12.0 | No (can only enable) |
 
-A stream can be created using the NATS CLI by supplying a JSON configuration file:
+### 1.2 Update
+
+Existing stream configurations can be modified dynamically using the NATS CLI without re-creating the stream or losing stored message history.
+
+Fields which cannot be updated (immutable):
+- Name (Stream name cannot be modified once created)
+- Storage
+
+### 1.3 Sequence Handling
+
+Movement of First Seq (`f`) and Last Seq (`l`) controls sequence bounds in the stream write-ahead log.
+
+Initial State (10 stored messages):
+Sequence Pointers:
+First Sequence: 1
+Last Sequence: 10
+
+Number Line View:
 ```bash
-nats stream add EVENTS --config=stream.json
+Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
+                       f                 l
 ```
 
+1. Purging all messages
+Sequence Pointers:
+First Sequence: 11
+Last Sequence: 10 (Stream is empty; next sequence will be 11)
+
+Number Line View:
+```bash
+Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10 [11]
+                                             f,l
+```
+
+2. Purging all messages below a message sequence
+Sequence Pointers:
+First Sequence: 4
+Last Sequence: 10
+
+Number Line View:
+```bash
+Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
+                             f           l
+```
+
+3. Purging all messages by retaining last N messages
+Sequence Pointers:
+First Sequence: 8
+Last Sequence: 10
+
+Number Line View:
+```bash
+Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
+                                   f     l
+```
+
+### 1.4 Criteria for Creating Separate Streams
+
+A Stream is the unit at which NATS applies storage, retention, ordering, replication, placement, and other stream-level policies. Therefore, subjects that need the same stream-level behavior can generally share a stream; subjects that require materially different stream-level behavior should be separated into different streams.
+
+**NATS Documentation Says:**
+> Relatively speaking the Stream is the most resource consuming component so being able to combine related data in this manner is important to consider.
+Reference: https://github.com/nats-io/nats.docs/blob/master/nats-concepts/jetstream/streams.md
+
+| Priority | Criterion                            | Same Stream                                                                              | Separate Streams                                                                                  |
+| -------: | ------------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+|    **1** | **Retention Policy**                 | Subjects have the same retention requirements (`MaxAge`, `MaxBytes`, retention behavior) | Subjects require materially different retention periods or retention semantics                    |
+|    **2** | **Replication / Durability**         | Same availability, durability and replication requirements                               | Different replication factors or different durability/HA requirements                             |
+|    **3** | **Placement / Cluster Boundary**     | Data can reside in the same NATS cluster and placement domain                            | Data must reside in different clusters, regions, accounts or placement boundaries                 |
+|    **4** | **Ordering Requirement**             | Subjects belong to the same logical ordering domain and cross-subject ordering is useful | Subjects have independent ordering domains or must not share ordering                             |
+|    **5** | **Backup / DR Policy**               | Same RPO, retention and DR tier                                                          | Different backup frequency, RPO, recovery requirements or DR tier                                 |
+|    **6** | **Security / Tenancy Boundary**      | Same security, access-control and ownership boundary                                     | Different teams, tenants, trust boundaries or access-control requirements                         |
+|    **7** | **Lifecycle / Ownership**            | Same application/domain ownership and lifecycle                                          | Independently owned, deployed, changed or retired                                                 |
+|    **8** | **Workload / Scale Characteristics** | Similar throughput, message size, traffic pattern and resource profile                   | One workload has substantially different scale, throughput, message size or resource requirements |
+|    **9** | **Consumption Model**                | Consumers can independently filter/process the subjects from the same stream             | Subjects require fundamentally different stream-level behavior that consumers cannot address      |
+|   **10** | **Operational Management**           | Can be monitored, governed, backed up and recovered together                             | Requires independent monitoring, alerting, backup, recovery or operational controls               |
+
+---
+
+## 2. Hands-On CLI Demonstrations
+
+### 2.1 Stream Creation Demo
+
+1. Setting up:
 `stream.json` defines the initial stream configuration:
 ```json
 {
@@ -115,286 +194,89 @@ nats stream add EVENTS --config=stream.json
 }
 ```
 
-### Update
+2. Simulating the Behaviour:
+```bash
+nats stream add EVENTS --config=stream.json
+```
 
-Existing stream configurations can be modified dynamically using the NATS CLI without re-creating the stream or losing stored message history.
+3. Checking the behaviour and working:
+```bash
+nats stream info EVENTS
+```
 
+### 2.2 Stream Update Demo
+
+1. Setting up:
+Prepare `stream-update.json` with updated metadata or subjects.
+
+2. Simulating the Behaviour:
 ```bash
 nats stream edit EVENTS --config=stream-update.json
 ```
 
-Fields which cannot be updated (immutable):
-- Name (Stream name cannot be modified once created)
-- Storage
-
-### Sequence Handling
-
-Movement of First Seq (`f`) and Last Seq (`l`) controls sequence bounds in the stream write-ahead log.
-
-Initial State (10 stored messages):
-Command:
+3. Checking the behaviour and working:
 ```bash
 nats stream info EVENTS
 ```
-Sequence Pointers:
-First Sequence: 1
-Last Sequence: 10
 
-Number Line View:
+### 2.3 Sequence Handling and Purge Demo
+
+##### 1. Full Stream Purge
+
+1. Setting up:
 ```bash
-Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
-                       f                 l
+# Populate EVENTS stream with test messages
+nats pub order.placed --count=10 "Order Event {{Count}}"
 ```
 
-1. Purging all messages
-
-Command:
+2. Simulating the Behaviour:
 ```bash
+# Purge all messages from the stream
 nats stream purge EVENTS -f
 ```
-Sequence Pointers:
-First Sequence: 11
-Last Sequence: 10 (Stream is empty; next sequence will be 11)
 
-Number Line View:
+3. Checking the behaviour and working:
 ```bash
-Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10 [11]
-                                             f,l
+# Verify first sequence is 11 and last sequence is 10 (stream is empty)
+nats stream info EVENTS
 ```
 
-2. Purging all messages below a message sequence
+##### 2. Sequence Offset Purge (`--seq=4`)
 
-Command:
+1. Setting up:
 ```bash
+# Populate EVENTS stream
+nats pub order.placed --count=10 "Order Event {{Count}}"
+```
+
+2. Simulating the Behaviour:
+```bash
+# Purge all messages below sequence 4
 nats stream purge EVENTS --seq=4 -f
 ```
-Sequence Pointers:
-First Sequence: 4
-Last Sequence: 10
 
-Number Line View:
+3. Checking the behaviour and working:
 ```bash
-Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
-                             f           l
+# Verify first sequence is now 4
+nats stream info EVENTS
 ```
 
-3. Purging all messages by retaining last N messages
+##### 3. Window Retention Purge (`--keep=3`)
 
-Command:
+1. Setting up:
 ```bash
+# Populate EVENTS stream
+nats pub order.placed --count=10 "Order Event {{Count}}"
+```
+
+2. Simulating the Behaviour:
+```bash
+# Purge stream while retaining only the last 3 messages
 nats stream purge EVENTS --keep=3 -f
 ```
-Sequence Pointers:
-First Sequence: 8
-Last Sequence: 10
 
-Number Line View:
+3. Checking the behaviour and working:
 ```bash
-Write-Ahead-Log-Index: 1 2 3 4 5 6 7 8 9 10
-                                   f     l
-```
-
-### Retention Handling
-
-Retention dictates when messages are automatically deleted from the stream (`retention` in stream configuration):
-
-1. Limits Retention (`retention: "limits"`)
-   - Default policy. Messages are retained until explicit stream limits (`max_msgs`, `max_bytes`, `max_age`, `max_msgs_per_subject`) are breached.
-   - Consumers can join at any time and replay stored messages.
-
-2. Interest Retention (`retention: "interest"`)
-   - Messages are automatically removed once all active consumers registered for the stream's subjects have acknowledged (`ACK`) them.
-   - If no consumers exist when a message is published, the message is removed immediately.
-
-3. Work Queue Retention (`retention: "workqueue"`)
-   - Messages are automatically removed as soon as ANY single consumer acknowledges (`ACK`) the message.
-   - Designed for worker-queue pattern processing where each event is processed exactly once by a single worker.
-
-Supporting Commands:
-
-1. Limits Retention Setup on EVENTS Stream
-
-```bash
-# Update EVENTS stream configuration with explicit storage and capacity limits (max 10 messages)
-nats stream edit EVENTS \
-  --max-msgs=5 \
-  --max-bytes=10MB
-
-# Publish 10 messages to order.placed (exceeding the max-msgs=10 limit)
-nats pub --jetstream order.placed --count 10 "Message {{Count}} @ {{Time}}"
-```
-
-2. Interest Retention Setup with 2 Consumers on EVENTS Stream
-
-```bash
-# Re-create EVENTS stream with interest retention policy
-# Note: Changing retention policy requires re-creating the stream (--force)
-nats stream add EVENTS \
-  --subjects="order.*","payment.*" \
-  --retention=interest \
-  --storage=file \
-  --force
-
-# Create Consumer 1 (C1) on EVENTS
-nats consumer add EVENTS C1 \
-  --filter="order.*" \
-  --ack=explicit \
-  --pull
-
-# Create Consumer 2 (C2) on EVENTS
-nats consumer add EVENTS C2 \
-  --filter="order.*" \
-  --ack=explicit \
-  --pull
-
-# Publish a test message
-nats pub order.created "Order Event 1"
-
-# Consume and ACK with Consumer 1 (Message retained in EVENTS; waiting for C2)
-nats consumer next EVENTS C1
-
-# Consume and ACK with Consumer 2 (Message purged from EVENTS once both C1 and C2 ACK)
-nats consumer next EVENTS C2
-```
-
-3. Work Queue Retention Setup on EVENTS Stream
-
-```bash
-# Re-create EVENTS stream with workqueue retention policy
-nats stream add EVENTS \
-  --subjects="order.*","payment.*" \
-  --retention=workqueue \
-  --storage=file \
-  --force
-
-# Create a pull worker consumer on EVENTS
-nats consumer add EVENTS WORKER \
-  --filter="order.*" \
-  --ack=explicit \
-  --pull
-
-# Publish a job task
-nats pub order.created "Process Payment Task"
-
-# Consume and ACK with WORKER (Message purged from EVENTS immediately upon 1st ACK)
-nats consumer next EVENTS WORKER
-```
-
-### Cleanup Policies
-
-Cleanup policies govern how JetStream manages storage bounds and removes limit-exceeded messages:
-
-Critical Pitfall:
-- Unbounded Disk Space Exhaustion: If retention limits (`max_msgs`, `max_bytes`, `max_age`) are not configured properly on a file-backed stream, continuous message publishing will exhaust available filesystem space, causing the NATS server node to crash or fail.
-
-1. Discard Old (`discard: "old"`)
-   - Default limit-enforcement policy (`max_msgs` or `max_bytes`).
-   - Oldest messages are discarded (`FirstSeq` advances forward) to make space for incoming messages.
-
-   Number Line View (Limit = 10, Message 11 arrives):
-   ```bash
-   Write-Ahead-Log-Index: [1] 2 3 4 5 6 7 8 9 10 11
-                              f                  l
-   ```
-
-2. Discard New (`discard: "new"`)
-   - When stream limits (`max_msgs` or `max_bytes`) are reached, new incoming published messages are rejected with an error (`nats: JetStream stream limit reached`).
-   - Preserves existing stored dataset without dropping older events.
-
-Supporting Commands:
-
-1. Discard Old Setup and Demonstration
-
-```bash
-# Configure EVENTS stream with discard=old policy and max-msgs=5
-nats stream edit EVENTS \
-  --discard=old \
-  --max-msgs=5
-
-# Publish 7 messages (exceeding the 5-message limit)
-nats pub --jetstream order.placed --count 7 "Message {{Count}} @ {{Time}}"
-
-# View stream state to confirm oldest messages 1 and 2 were dropped (FirstSeq: 3, LastSeq: 7)
+# Verify first sequence is now 8 (retaining sequences 8, 9, 10)
 nats stream info EVENTS
 ```
-
-2. Discard New Setup and Demonstration
-
-```bash
-# Purge stream and re-configure EVENTS stream with discard=new policy and max-msgs=5
-nats stream purge EVENTS -f
-nats stream edit EVENTS \
-  --discard=new \
-  --max-msgs=5
-
-# Publish 5 messages to fill stream capacity
-nats pub --jetstream order.placed --count 5 "Message {{Count}} @ {{Time}}"
-
-# Attempt to publish a 6th message (rejected by server with stream limit error)
-nats pub --jetstream order.placed "Overflow Message 6"
-
-# View stream state to confirm original 5 messages are retained (FirstSeq: 1, LastSeq: 5)
-nats stream info EVENTS
-```
-
-### Backup and Restore
-
-NATS JetStream supports snapshotting stream state and stored messages for backup and disaster recovery operations.
-
-Snapshot Artifacts:
-- `backup.json`: Stream state, configuration metadata, consumer states, and sequence offset boundaries.
-- `stream.tar.s2`: s2-compressed log file segments containing stored stream messages.
-
-![Stream Backup and Restore](stream_backup_and_restore.png)
-
-Backup CLI Configuration Options:
-- `--[no-]consumers`: Toggles including consumer definitions, durability states, and ACK sequence positions in the backup (default: `--consumers`).
-- `--chunk-size=CHUNK-SIZE`: Sets the byte size of each data chunk sent by the server during backup streaming (e.g., `1024KB`). Controls transfer packet sizing.
-- `--window-size=WINDOW-SIZE`: Sets the sliding flow-control window size (outstanding unacknowledged bytes) during snapshot transfer. Tuning this option mitigates network timeouts and rate-mismatch issues over slow disks or distant links.
-
-Key Operational Pitfalls:
-- Memory-backed streams (`storage: "memory"`) cannot be snapshotted.
-- The stream name cannot be modified during a restore operation (must restore under original stream name).
-- Flow control can time out during backup/restore over slow disks or high-latency network links (tune `--window-size` and `--chunk-size` to prevent timeouts).
-
-```bash
-# Check current state
-nats stream state EVENTS
-
-# Backup to file with explicit consumer inclusion, chunk-size, and window-size tuning
-nats stream backup EVENTS "./backups/events/$(date +%Y-%m-%d)" \
-  --consumers \
-  --chunk-size=1024KB \
-  --window-size=8MB
-
-# Delete the stream
-nats stream rm EVENTS
-
-# Restore the stream
-nats stream restore ./backups/events/$(date +%Y-%m-%d)
-```
-
-#### Stream Backup to Object Store (S3)
-- Covered in separate reference document - [Stream Backup to Object Store](../stream_backup_object_store.md)
-
-### Creteria for creating seperate streams
-
-A Stream is the unit at which NATS applies storage, retention, ordering, replication, placement, and other stream-level policies. Therefore, subjects that need the same stream-level behavior can generally share a stream; subjects that require materially different stream-level behavior should be separated into different streams.
-
-**NATS Documentation Says:**
-> Relatively speaking the Stream is the most resource consuming component so being able to combine related data in this manner is important to consider.
-Reference: https://github.com/nats-io/nats.docs/blob/master/nats-concepts/jetstream/streams.md
-
-
-| Priority | Criterion                            | Same Stream                                                                              | Separate Streams                                                                                  |
-| -------: | ------------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-|    **1** | **Retention Policy**                 | Subjects have the same retention requirements (`MaxAge`, `MaxBytes`, retention behavior) | Subjects require materially different retention periods or retention semantics                    |
-|    **2** | **Replication / Durability**         | Same availability, durability and replication requirements                               | Different replication factors or different durability/HA requirements                             |
-|    **3** | **Placement / Cluster Boundary**     | Data can reside in the same NATS cluster and placement domain                            | Data must reside in different clusters, regions, accounts or placement boundaries                 |
-|    **4** | **Ordering Requirement**             | Subjects belong to the same logical ordering domain and cross-subject ordering is useful | Subjects have independent ordering domains or must not share ordering                             |
-|    **5** | **Backup / DR Policy**               | Same RPO, retention and DR tier                                                          | Different backup frequency, RPO, recovery requirements or DR tier                                 |
-|    **6** | **Security / Tenancy Boundary**      | Same security, access-control and ownership boundary                                     | Different teams, tenants, trust boundaries or access-control requirements                         |
-|    **7** | **Lifecycle / Ownership**            | Same application/domain ownership and lifecycle                                          | Independently owned, deployed, changed or retired                                                 |
-|    **8** | **Workload / Scale Characteristics** | Similar throughput, message size, traffic pattern and resource profile                   | One workload has substantially different scale, throughput, message size or resource requirements |
-|    **9** | **Consumption Model**                | Consumers can independently filter/process the subjects from the same stream             | Subjects require fundamentally different stream-level behavior that consumers cannot address      |
-|   **10** | **Operational Management**           | Can be monitored, governed, backed up and recovered together                             | Requires independent monitoring, alerting, backup, recovery or operational controls               |
