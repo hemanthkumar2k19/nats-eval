@@ -1,0 +1,211 @@
+title NATS Stream Creation
+
+# Publish Sync Request
+client -> server: Sync Publish Req
+note over client, server: Sub: $JS.API.STREAM.CREATE.{stream_name} \n Cluster-Wide Broadcast
+
+server ->> server: Check if Jetstream is enabled
+
+alt Jetstream not enabled
+  server --> client: Err timeout (Silent Drop)
+else Jetstream enabled
+
+  server ->> server: Extract message from Raw Wire Format
+  note over server: headers \n msg \n clientInfo \n account \n err
+  
+  alt Invalid JSON
+    server --> client: Error ClientInfoHdr
+  end
+  
+  server ->> server: Resolve Account: $G / $SYS / Custom Account
+  
+  alt Account not Resolved
+    server --> client: Error ErrMissingAccount
+  end
+end
+
+# Cluster Check - The Leadership Gate
+server ->> server: Check IsJetStreamClustered
+alt JetStreamClustered
+  server ->> server: Extract streamController and clusterNode
+  note over server: ClusterNode is controller node which manages the Meta Raft Group
+    
+  server ->> server: Check IsLeaderLess
+  alt LeaderLess
+    server --> client: Error JSClusterNotAvailError
+  end
+    
+  server ->> server: Check JetStreamIsLeader
+  alt Not Leader
+    server --> client: Err timeout (Silent Drop)
+  end
+end
+
+server ->> server: Check RequiredAPILevel
+note over server: Header: Nats-Require-Api-Level \n Compatibility b/w Client SDK and Server
+
+alt JSApiLevel < minLevel
+  server --> client: Error JSRequiredApiLevelError
+end
+
+server ->> server: Check AccountJetStreamEnabled
+alt AccountJetStreamEnabled = False
+  alt Leaf Node
+    server --> client: Err timeout (Silent Drop)
+  else Not Leaf Node
+    server --> client: Error JSNotEnabledForAccountError
+  end
+end
+
+server ->> server: Extract Payload JSON
+
+alt Invalid JSON
+  server --> client: Error JSInvalidJSONError
+end
+
+server ->> server: Stamps Metadata with Version Tags for Compatibility
+
+server ->> server: Validate Stream Name
+note over server: Checks in Subject and Config File (if provided)
+
+alt Name mismatch
+  server --> client: Error JSStreamMismatchError
+end
+
+server ->> server: Checks if Stream Name has {'\', '/'}
+note over server: In File Storage, NATS uses Stream Name to create a Dir on Server Disk
+
+alt Contains {'\', '/'} 
+  server --> client: Error JSStreamNameContainsPathSeparatorsError
+end
+
+server ->> server: Check Sealed enabled in Config
+note over server: Sealing a stream is a permanent, terminal action that turns a stream into an immutable archive \n No New Messages Allowed \n No Deletions or Purges \n Configuration Locked \n Read-Only Access
+
+alt Sealed Enabled
+  server --> client: Error JSStreamInvalidConfigError
+end
+
+server ->> server: Check MirrorStream and MirrorDirectEnabled
+note over server: **Mirror**: read-only 1:1 replica of an origin stream. \n**MirrorDirect**: High Performance Feature allowing Direct Read from Mirror Streams
+
+alt No MirrorStream and MirrorDirectEnabled
+  server --> client: Error JSStreamInvalidConfigError
+end
+
+# Cluster Check - The Execution Fork
+server ->> server: Check IsJetStreamClustered
+
+alt StandaloneStream
+  server ->> server: Check Account.StreamLimit
+  note over server: Checks: MaxStreams, MaxMemory, MaxStore
+  
+  alt LimitsExceed
+    server --> client: Error (JSMaxStreamsLimitError / JSMaxMemoryLimitError / JSMaxStorageLimitError)
+  end
+  
+  server ->> server: Creates Stream (acc.addStreamPedantic -> addStreamWithAssignmentAndMode)
+  note over server: Check Subject Overlap \n Allocates Runtime Instance (mset) \n Init Memory/File Disk Storage \n Starts Background Ingress Queue & Consumer Signal Loops
+  
+  alt JSStreamStoreFailed
+    server --> client: Error JSStreamCreateError
+  end
+  
+  # Standalone Synchronous Immediate Reply
+  server -> client: Sync Reply at _INBOX.xxx (Sent immediately by jsStreamCreateRequest)
+
+else ClusteredStream
+  server ->> server: Extract streamController (js) and clusterNode (cc)
+  
+  alt streamController==nil or clusterNode==nil
+    server --> client: Err timeout (Silent Drop)
+  end
+  
+  server ->> server: Check StreamConfig and Normalise (s.checkStreamCfg)
+   
+  alt InvalidParamsExist
+    server --> client: Err JSStreamInvalidConfigError
+  end
+  
+  server ->> server: Check streamAssignmentOrInflight
+  
+  alt NOT DeepEqual on StreamConfig (Conflicting Config)
+    server --> client: Err JSStreamNameExistError
+  else Identical StreamConfig (Idempotent Retry)
+    server ->> server: Use Existing Assignment State
+    note over server: Re-uses Existing Assignment Pointer (self), Raft Group (rg), and Sync Subject (syncSubject)
+  end
+   
+  server ->> server: Check Sealed
+  alt IsSealed
+    server --> client: Err JSStreamInvalidConfigError
+  end
+  
+  server ->> server: Check Cluster Wide Subject Overlap (js.subjectsOverlap)
+  alt Subjects Overlap
+    server --> client: Err JSStreamSubjectOverlapError
+  end
+   
+  server ->> server: Check ClusteredStreamLimitsCheck (js.jsClusteredStreamLimitsCheck)
+  alt Limits Exceeded
+    server --> client: Err (JSMaximumStreamsLimitError / JSMaxMemoryLimitError / JSMaxStorageLimitError)
+  end
+  
+  # Stream Raft Group Selection
+  server ->> server: Check Stream Raft Group State (rg == nil)
+  alt RaftGroup == nil
+    server ->> server: Create Stream Raft Group (js.createGroupForStream)
+    note over server: Determines Replica Count \n Evaluates Placement Rules \n Picks Target Peer Nodes \n Instantiates Raft Group
+    
+    alt Failed to Create Group
+      server --> client: Error JSClusterNoPeersError
+    end
+     
+    server ->> server: rg.setPreferred(s)
+    
+    group Initial Stream Raft Leader Selection
+      alt Single Replica
+        server ->> server: Choose the only node available
+      else Multi Replica
+        server ->> server: Filter online & healthy nodes. Select one randomly to favor initial campaign
+      end
+    end
+  end
+  
+  # Stream Sync Subject
+  server ->> server: Check Stream Sync Subject (syncSubject == "")
+  alt SyncSubject Empty
+    server ->> server: Create Stream Sync Subject (syncSubjForStream -> $JSC.SYNC...)
+  end
+  
+  # Set Timestamp
+  server ->> server: Set Creation Timestamp (Preserves self.Created on retry or time.Now().UTC())
+  
+  # Stream Assignment & Meta Raft Proposal
+  server ->> server: Create Stream Assignment Struct (sa)
+  note over server: Includes: Group (rg), SyncSubject, Config, Subject ($JS.API.STREAM.CREATE.<stream_name>), Reply (_INBOX.xxx), Client, Created  
+  
+  server ->> server: ProposeStreamAssignmentToMetaRaft (cc.meta.Propose)
+  note over server: Submits encodeAddStreamAssignment(sa) proposal to Meta Raft Log for cluster-wide replication
+  
+  server ->> server: TrackInflightProposal (cc.trackInflightStreamProposal)
+  note over server: Registers in-flight proposal to handle concurrent creates correctly
+
+  # Asynchronous Post-Raft Replication & Stream Leader Reply
+  group Post-Raft Commit Execution & Stream Leader Reply
+    server ->> peerNodes: Replicate & Commit Meta Raft Log Entry across Cluster
+    peerNodes ->> peerNodes: ProcessStreamAssignment (js.processStreamAssignment)
+    note over peerNodes: Executed on all cluster members when Meta Raft log entry commits
+    
+    peerNodes ->> peerNodes: ProcessClusterCreateStream (js.processClusterCreateStream)
+    note over peerNodes: Executed on assigned replica nodes (rg.Peers)
+    
+    peerNodes ->> peerNodes: InstantiateStream (addStreamWithAssignmentAndMode)
+    note over peerNodes: Initializes Local Storage Engine (File/Memory) & Starts Stream Raft Group (if R > 1)
+    
+    streamLeader ->> streamLeader: ProcessStreamLeaderChange (js.processStreamLeaderChange)
+    note over streamLeader: Executed on newly elected Stream Raft Leader
+    
+    streamLeader -> client: Async Reply at _INBOX.xxx (Sent by Stream Leader via sa.Reply)
+  end
+end
