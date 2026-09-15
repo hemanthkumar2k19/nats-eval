@@ -5,9 +5,9 @@
 1. Lifecycle
     - Creation
         - Why and when streams are created
-        - Cluster-wide creation process <!-- TODO -->
-        - Replica allocation and node-selection logic <!-- TODO -->
-        - Replica placement rules and hotspot avoidance <!-- TODO -->
+        - Cluster-wide creation process
+        - Replica allocation and node-selection logic
+        - Replica placement rules and hotspot avoidance
     - Update
     - Sequence Handling
     - Retention Handling

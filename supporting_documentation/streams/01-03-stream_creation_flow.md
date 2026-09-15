@@ -60,17 +60,6 @@ The Meta Raft Leader performs additional cluster-wide checks and orchestrates a 
 - Cluster-wide subject overlap check: a subject can belong to only one stream across the entire cluster
 - Cluster-wide account limits check (MaxStreams, MaxMemory, MaxStore aggregated across nodes)
 
-**Replica Placement and Raft Group Creation**
-
-The Meta Leader selects which nodes will host the stream replicas:
-
-- Determines replica count from config
-- Evaluates placement rules (tags, cluster constraints)
-- Picks target peer nodes, considering node health and distribution
-- Creates the Stream Raft Group for this stream
-- Selects a preferred initial Stream Leader (random among online healthy nodes for multi-replica; the sole node for R=1)
-- Generates the stream's sync subject (`$JSC.SYNC.<unique_inbox>`) for Raft replication transport
-
 **Meta Raft Proposal**
 
 The Meta Leader builds a stream assignment containing the Raft group, sync subject, stream config, client reply inbox, and timestamp. It proposes this assignment to the Meta Raft log for cluster-wide replication and tracks the inflight proposal to handle concurrent creates correctly.
@@ -89,6 +78,117 @@ This is the key architectural difference from standalone: the client's reply com
 
 ---
 
+## Replica Allocation and Node Selection
+
+During clustered stream creation, the Meta Raft Leader must decide which nodes will host the stream's replicas. This is handled by a two-stage node selection pipeline: first discard ineligible nodes through hard constraints, then rank the remaining candidates to balance load.
+
+### Selection Pipeline
+
+The Meta Leader starts with all peers known to the Meta Raft Group as candidates. The pipeline proceeds as follows:
+
+1. **Target Cluster Resolution**: If `Placement.Cluster` is specified in the stream config, only nodes in that cluster are considered. If not set, it defaults to the cluster of the originating client, with any configured alternate clusters available as fallback.
+
+2. **Candidate Randomization**: The candidate list is shuffled randomly before filtering. This prevents tie-breaking from always favoring the same nodes based on registration order in the cluster topology.
+
+3. **Hard Filtering**: Each candidate is evaluated against placement constraints (detailed below). Nodes that fail any constraint are discarded.
+
+4. **Scoring and Sorting**: Remaining candidates are ranked by a multi-tiered sort to distribute load (detailed below).
+
+5. **Selection**: The top R nodes (where R is the configured replica count) are selected to form the Stream Raft Group.
+
+6. **Initial Leader Selection**: For multi-replica streams, a preferred initial Stream Leader is selected randomly from online healthy nodes in the group. For R=1, the sole node is used.
+
+7. **Sync Subject Assignment**: A unique internal subject (`$JSC.SYNC.<unique_inbox>`) is generated for the stream's Raft replication transport.
+
+8. **Multi-Cluster Fallback**: If placement fails on the primary cluster due to insufficient resources, the system automatically retries on alternate clusters within the account's placement configuration.
+
+---
+
+## Replica Placement Rules
+
+During the filtering phase, candidate nodes are evaluated against six placement constraints. A node that fails any constraint is discarded from the candidate pool.
+
+| Rule | Constraint | What It Prevents |
+| ---: | ---------- | ---------------- |
+| 1 | **Liveness and Target Cluster** -- Node must belong to the target cluster, be online, and be active | Placing replicas on unreachable or wrong-cluster nodes |
+| 2 | **JetStream Exclusion** -- Nodes tagged with `!jetstream` are skipped | Placing replicas on nodes explicitly excluded from JetStream workloads |
+| 3 | **User Placement Tags** -- Mandatory tags (e.g., `cloud:aws`) must be present; exclusion tags (e.g., `!rack:us-east-1c`) cause the node to be discarded | Misplacement relative to operator-defined infrastructure topology |
+| 4 | **Storage Capacity** -- Real-time available storage (memory or disk minus reserved/used) must accommodate the stream's `MaxBytes` if configured | Placing replicas on nodes that cannot store the stream's data |
+| 5 | **HA Assets Cap** -- If `MaxHAAssets` limit is configured, nodes already at the limit are discarded | Over-concentrating HA workloads on specific nodes |
+| 6 | **Fault Domain Anti-Affinity** -- Configured via `JetStreamUniqueTag` (e.g., `rack:` or `zone:` prefix). No two replicas of the same stream may share the same unique tag value | Co-locating replicas in the same failure domain (same rack, same zone) |
+
+---
+
+## Hotspot Avoidance
+
+After filtering, NATS ranks the remaining candidates using real-time resource density metrics to prevent hot-spotting:
+
+- **peerStreams**: Total number of streams currently assigned to the node
+- **peerHA**: Total number of high-availability (R > 1) streams and consumers assigned to the node
+
+### Sorting Strategy
+
+The candidates are sorted through a two-pass ranking:
+
+**Primary Sort** (determines base order):
+
+| Priority | Criterion | Direction | Effect |
+| -------: | --------- | --------- | ------ |
+| 1 | Online status | Online first | Avoids placing on nodes that are currently offline |
+| 2 | Available storage | Descending | Nodes with the most free disk/memory space rank higher |
+| 3 | Total stream count | Ascending | Nodes hosting fewer streams rank higher (tie-breaker) |
+
+**Secondary Stable Sort** (applied on top for R > 1 streams):
+
+| Criterion | Direction | Effect |
+| --------- | --------- | ------ |
+| HA asset count | Ascending | Nodes with fewer HA workloads rank higher |
+
+Because the secondary sort is stable, nodes with equal HA density preserve their primary order (most free storage, fewest total streams). This produces a final ranking that balances HA workload distribution while respecting storage capacity.
+
+The top R nodes from this ranked list form the stream's Raft group.
+
+---
+
+## Client-Side Placement and Leadership Control
+
+While the server autonomously selects the final nodes and leader, the client can declaratively constrain replica placement at creation time and transfer leadership post-creation.
+
+### Replica Placement (At Creation)
+
+The client influences node selection through `StreamConfig.Placement`. The client cannot pass explicit node IDs -- the server always makes the final selection from the constrained candidate pool using its scoring engine.
+
+| Placement Control | Config Field | Effect | CLI Example |
+| ----------------- | ------------ | ------ | ----------- |
+| Target cluster | `Placement.Cluster` | Restricts selection exclusively to nodes in the specified cluster | `nats stream add ORDERS --cluster aws-us-east-1` |
+| Mandatory tags | `Placement.Tags` (e.g., `cloud:aws`, `disk:nvme`) | Node must have all specified tags to be eligible | `nats stream add ORDERS --tag cloud:aws --tag disk:nvme` |
+| Exclusion tags | `Placement.Tags` with `!` prefix (e.g., `!rack:us-east-1c`) | Node is discarded if it carries the excluded tag | `nats stream add ORDERS --tag '!rack:us-east-1c'` |
+| Replica count | `Replicas` | Dictates the Raft group size (R) | `nats stream add ORDERS --replicas 3` |
+
+Within the pool of nodes satisfying these constraints, the server's selection engine autonomously picks the top R nodes using available storage, HA asset density, stream counts, and fault domain unique tags.
+
+### Leadership (At Creation vs Post-Creation)
+
+**At creation**: The client cannot specify or force an initial Stream Leader. The server randomly selects an online peer from the Raft group to initiate the Raft campaign, and Raft consensus elects the leader autonomously.
+
+**Post-creation**: The client can request leadership transfer to a specific node using the Leader Step-Down API:
+
+- Subject: `$JS.API.STREAM.LEADER.STEPDOWN.<stream_name>`
+- Payload: `{ "placement": { "preferred": "<node_name>" } }`
+- The current Stream Leader evaluates the preferred placement and invokes a graceful Raft leadership transfer to the specified node.
+
+### Summary
+
+| Decision | Client Control | Mechanism |
+| -------- | :------------: | --------- |
+| Target cluster | Yes | `Placement.Cluster` |
+| Node tag requirements / exclusions | Yes | `Placement.Tags` |
+| Exact replica node IDs | No | Server-side selection engine |
+| Initial Stream Leader | No | Server-side random selection + Raft election |
+| Leader transfer post-creation | Yes | `$JS.API.STREAM.LEADER.STEPDOWN` with preferred placement |
+
+---
+
 ## Key Architectural Points
 
 | Aspect | Detail |
@@ -98,7 +198,10 @@ This is the key architectural difference from standalone: the client's reply com
 | Non-leader handling | Silent drop; client SDK retries through route mesh |
 | Subject ownership | A subject can belong to exactly one stream; enforced cluster-wide |
 | Idempotent creates | Identical config retry reuses existing assignment state |
-| Replica selection | Meta Leader picks nodes based on replica count, placement rules, and node health |
+| Replica selection | Two-stage pipeline: hard filtering (6 constraints) then multi-tiered scoring |
+| Hotspot avoidance | Sorted by online status, available storage, stream count, and HA density |
+| Fault domain isolation | `JetStreamUniqueTag` prevents co-locating replicas in the same rack/zone |
+| Multi-cluster fallback | Automatic retry on alternate clusters if primary has insufficient resources |
 | Raft transport | Internal NATS subjects (`$JSC.SYNC`, `$JSC.R`) -- no extra ports |
 | Standalone reply | Synchronous from receiving server |
 | Clustered reply | Asynchronous from elected Stream Leader after Meta Raft commit |

@@ -72,6 +72,90 @@ Location Transparency: A Raft peer can move or be re-assigned to any server in t
 Security & Isolation: $JSC subjects are internal System Account subjects, completely inaccessible to standard user connections.
 
 
+### 1. Overview & Key Entry Points
+
+When creating a stream in a cluster, the Meta Raft Leader invokes `js.createGroupForStream` to select the physical peer nodes that will host the stream's Raft group (`raftGroup`).
+
+The core decision-making algorithm is implemented in `cc.selectPeerGroup`. It executes a **2-stage process**:
+1. **Hard Filtering**: Discards ineligible cluster nodes based on status, storage, placement tags, and fault domains.
+2. **Weighted Scoring & Sorting**: Ranks remaining valid nodes to avoid hotspots and balance load.
+
+---
+
+### 2. Replica Allocation & Node Selection Pipeline
+
+```mermaid
+flowchart TD
+    A["Cluster Candidates (meta.Peers)"] --> B["Random Shuffle (rand.Shuffle)"]
+    B --> C{"Hard Filtering Phase"}
+    C -->|Offline / Non-selectable| D[Discard]
+    C -->|Cluster Mismatch| D
+    C -->|Tagged '!jetstream'| D
+    C -->|Placement Tag Mismatch| D
+    C -->|Insufficient Memory/Disk| D
+    C -->|Exceeds MaxHAAssets Limit| D
+    C -->|Duplicate Unique Tag (Same Rack/Zone)| D
+    
+    C -->|Passed Filters| E["Candidate Pool (wn)"]
+    E --> F{"Sorting & Hotspot Avoidance Phase"}
+    F -->|1. Online status| G[Sort]
+    F -->|2. HA Asset Density (ha ascending)| G
+    F -->|3. Available Storage (avail descending)| G
+    F -->|4. Total Stream Count (ns ascending)| G
+    G --> H["Pick top R Nodes for Raft Group"]
+```
+
+#### Step-by-Step Flow:
+1. **Target Cluster Resolution**:
+   - Checks `cfg.Placement.Cluster`. If not explicitly set, defaults to `ci.Cluster` (the cluster of the originating client/request) and appends `ci.Alternates`.
+2. **Candidate Shuffling**:
+   - Peer list is initially randomized (`rand.Shuffle`) so tie-breaking doesn't always favor the first registered server in cluster topology.
+
+---
+
+### 3. Replica Placement Rules (Hard Constraints)
+
+During the filtering loop, candidate nodes are evaluated against 6 placement rules:
+
+1. **Liveness & Target Cluster**:
+   - Node must belong to the target cluster (`ni.cluster == cluster`).
+   - Node must be online and active (`ni.selectable()`).
+2. **Explicit Placement Exclusions**:
+   - Nodes carrying the `!jetstream` tag (`jsExcludePlacement`) are skipped.
+3. **User Placement Tags (`Placement.Tags`)**:
+   - **Mandatory Tags**: If `tag` is specified (e.g., `cloud:aws`), the node **must** have it.
+   - **Excluded Tags**: If `!tag` is specified (e.g., `!rack:us-east-1c`), any node with that tag is discarded.
+4. **Storage Space Constraints**:
+   - Computes real-time available storage (`cfg.MaxMemory` or `cfg.MaxStore` minus reserved/used space).
+   - If `cfg.MaxBytes` is defined on the stream and exceeds available space on a node, the node is discarded.
+5. **HA Assets Cap**:
+   - If `JetStreamLimits.MaxHAAssets` is set, nodes exceeding this count are discarded.
+6. **Fault Domain & Anti-Affinity Enforcement (`JetStreamUniqueTag`)**:
+   - Configured via `uniqueTagPrefix` (e.g., `"rack:"` or `"zone:"`).
+   - Function `checkUniqueTag` ensures **no two replicas of the same stream share the same unique tag value** (e.g., node 1 on `rack:A` and node 2 on `rack:A` cannot be in the same Raft group).
+
+---
+
+### 4. Hotspot Avoidance & Load Balancing (Scoring)
+
+To prevent hot-spotting specific servers, NATS calculates real-time resource density for every node in the cluster before placing a stream:
+- **`peerStreams`**: Total number of streams assigned to the node.
+- **`peerHA`**: Total number of high-availability (Replicas > 1) streams/consumers assigned to the node.
+
+#### Multi-Tiered Sorting Engine:
+1. **Primary Sort (Storage & Stream Count)**:
+   - Prefer **Online** servers over Offline servers.
+   - Rank by **Available Storage** (`avail` descending: nodes with the most free disk/memory space first).
+   - Tie-breaker: Rank by **Total Stream Count** (`ns` ascending: nodes hosting fewer total streams first).
+2. **Secondary Stable Sort (HA Asset Density)**:
+   - For replicated streams ($R > 1$), `slices.SortStableFunc` sorts candidate nodes by **HA Asset Count** (`ha` ascending).
+   - Because it is a stable sort, among nodes with equal HA asset density, it preserves the primary order (free storage & lower stream count).
+
+---
+
+### 5. Multi-Cluster Fallback Retry
+
+If placement fails on the primary cluster due to `JSInsufficientResourcesErr`, [`processStreamAssignmentResults`] automatically inspects `ci.Alternates` and attempts to retry `createGroupForStream` on alternate clusters within the account's placement configuration.
 
 
 ## Go Code Internals
@@ -100,8 +184,4 @@ go
 cc.isLeader()  // or s.JetStreamIsLeader()
 If cc.isLeader() == true $\rightarrow$ This server node is the Meta Raft Leader!
 If cc.isLeader() == false $\rightarrow$ This server node is a Meta Raft Follower.
-
-
-
-
 
