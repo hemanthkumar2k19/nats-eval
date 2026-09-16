@@ -220,15 +220,76 @@ If cc.isLeader() == false $\rightarrow$ This server node is a Meta Raft Follower
 
 ## Understanding Raft Mechanism
 
+### Communication b/w Nodes
+- Asynchronous NATS System Messages over internal subjects
+- Append Entries Subject: $SYS.RAFT.<group_id>.A
+- Vote Request Subject: $SYS.RAFT.<group_id>.V
+- Replies sent to designated reply subjects ($SYS.RAFT.<group_id>.AR / .VR)
+
+### Log
+- Sequential index data: {index, term, Type, Data(Binary)}
+- Physically each node maintains its own local WAL file on disk (`n.wal`)
+- Logical content consistency is enforced across peers via Quorum commit
+
 ### Quorum
-- Floor[n/2]+1
+- Floor[n/2] + 1 (e.g., 2 of 3, 3 of 5)
+
+### Entry and Commit
+1. Proposal (Leader):
+   - Leader receives request -> wraps in `Entry{Type, Data}` with next index (`pindex + 1`)
+   - Leader writes `Entry` to its local WAL (`n.wal.StoreMsg`)
+   - Leader broadcasts `appendEntry` frame to all followers
+2. Replication (Followers):
+   - Follower receives `appendEntry` -> verifies log consistency (`pterm` & `pindex`)
+   - Follower appends entry to its local WAL -> sends `appendEntryResponse` ACK to leader
+3. Commit (Leader):
+   - Leader tallies ACKs asynchronously
+   - Once entry is replicated on Quorum (majority) -> leader advances `commit` index (`n.commit = index`)
+4. Apply (Leader & Followers):
+   - Both leader and followers push committed entries (`commit > applied`) to internal `n.apply` queue
+   - Upper layers (`jetStreamCluster` or `stream`) consume `n.apply` to update state machines
+
+### Campaign
+- Will be normal or immediate (`xferCampaign`)
+1. Transition to Candidate:
+   - Increment term (`term++`)
+   - Vote for itself (`vote = id`, persisted to disk)
+   - Change State to Candidate
+   - Update leader state to none
+2. Requesting Votes:
+   - Broadcast `voteRequest(term, pterm, pindex, candidateID)` to peers
+3. Peer Voting Logic:
+   - Candidate term >= peer's current term
+   - Peer did not vote for another candidate in this term
+   - Candidate log is at least as up-to-date as peer log (`lastTerm` & `lastIndex`)
+4. Winning:
+   - Tally votes as they arrive asynchronously
+   - Votes >= Quorum -> switch to Leader (`switchToLeader()`)
+   - Broadcast `sendPeerState` to announce leadership and synchronize peer topology
 
 ### HeartBeat
-- Every 1s leader sendHeartbeat()
-- When a follower responds leader updates peer.ts = time.Now()
-- Every 10s leader lostQuorumLocked()
-- If majority is not there, leader steps down - self demotes
+- Every 1s leader sends `sendHeartbeat()` (empty `appendEntry`)
+- When a follower responds, leader updates peer timestamp (`ps.ts = time.Now()`)
+- Leader periodically checks `lostQuorumLocked()`
+- If majority is not active/responsive, leader steps down (self-demotes)
 
 ### Recovery
 - 
 
+### Re Election
+- Followers reset election timer on receiving any `appendEntry` (heartbeat, data, or peer state) from leader
+- When leader fails, follower election timer expires -> triggers `Campaign`
+
+#### Case 1: Voluntary Stepdown (Graceful / `CampaignImmediately`)
+- Leader checks authority -> picks healthiest up-to-date peer
+- Leader sends `EntryLeaderTransfer(peerID)` directly to cluster -> steps down
+- Nominated peer receives entry -> skips election wait -> triggers `CampaignImmediately` (10ms timer)
+- Nominated peer increments term, votes for self, requests votes, wins quorum -> broadcasts `sendPeerState`
+
+#### Case 2: Node Unavailable (Unplanned Crash / Network Partition)
+- Leader crashes -> heartbeats stop
+- Followers' randomized election timers (1.5s–3.0s) count down independently
+- Follower with shortest timer expires first -> wakes up and calls `Campaign`
+- Candidate increments term (`term++`), votes for self, broadcasts `voteRequest(term, pterm, pindex, candidateID)`
+- Peers grant vote IF: candidate term >= peer term AND candidate log is at least as up-to-date
+- Candidate collects votes >= Quorum -> switches to Leader -> broadcasts `sendPeerState`
