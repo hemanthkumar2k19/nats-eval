@@ -185,3 +185,50 @@ cc.isLeader()  // or s.JetStreamIsLeader()
 If cc.isLeader() == true $\rightarrow$ This server node is the Meta Raft Leader!
 If cc.isLeader() == false $\rightarrow$ This server node is a Meta Raft Follower.
 
+
+
+## Stream Cluster Operations
+
+### Leadership Stepdown
+- Subject: $JS.API.STREAM.LEADER.STEPDOWN.<stream_name>
+- Handler: jsStreamLeaderStepDownRequest
+- Guard Check: Return if client == nil or !JetStreamEnabled
+- Request Info: Extract ClientInfo and Resolve Target Account
+- Stream Name: Extract 6th token from subject string
+- Cluster Check: If !JetStreamIsClustered -> Return NewJSClusterRequiredError()
+- Meta Leaderless: Get JetStream Cluster state; if Meta Raft is leaderless -> Return NewJSClusterNotAvailError()
+- Stream Assignment: Meta Leader checks if Stream Assignment exists in cluster registry; if Meta Leader & missing -> Return NewJSStreamNotFoundError() (Followers exit silently)
+- API Level: If client API level is incompatible -> Return NewJSRequiredApiLevelError()
+- Account JetStream: If JetStream disabled for account & not a LeafNode -> Return NewJSNotEnabledForAccountError()
+- Stream Group Leaderless: If Stream Raft Group has lost quorum/leader -> Return NewJSClusterNotAvailError()
+- Stream Leader Gate: If THIS node is NOT the active Stream Raft Leader -> Exit silently (only active Stream Leader proceeds)
+- Stream Lookup: Resolve local Stream Instance from account; if lookup fails -> Return NewJSStreamNotFoundError()
+- Inactive Stream Guard: If local Stream Instance or Stream Raft Node is inactive/nil -> Return Success = true
+- Preferred Placement: If JSON body present -> Unmarshal request & resolve preferred target node (Placement.Preferred)
+- Execute StepDown: Invoke Raft StepDown -> Appends EntryLeaderTransfer log entry to initiate leadership transfer
+
+### Raft StepDown Internal Process (raft.StepDown)
+- Leader Verification: Under lock, verify current node is still Leader (`n.State() == Leader`)
+- Preferred Peer Check: If preferred target specified, verify peer is online & healthy (`!offline` & recent heartbeat ACK < 3s)
+- Fallback Peer Selection: If preferred peer is absent or unhealthy, pick first available healthy follower node
+- Leader Transfer Entry: Broadcast special `EntryLeaderTransfer` log entry containing target peer ID directly via `sendAppendEntry()`
+- Demote Local State: Invoke `n.stepdown(noLeader)` -> demotes current node to Follower and resets election timers
+- Target Peer Fast-Track: Target peer receives `EntryLeaderTransfer` -> triggers `CampaignImmediately()` to become new Raft Leader instantly
+
+- Final Response: If Raft error -> Return NewJSRaftGeneralError(), else -> Return Success = true
+
+
+## Understanding Raft Mechanism
+
+### Quorum
+- Floor[n/2]+1
+
+### HeartBeat
+- Every 1s leader sendHeartbeat()
+- When a follower responds leader updates peer.ts = time.Now()
+- Every 10s leader lostQuorumLocked()
+- If majority is not there, leader steps down - self demotes
+
+### Recovery
+- 
+

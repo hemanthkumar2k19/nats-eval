@@ -5,7 +5,7 @@
 1. Lifecycle
     - Creation
         - Why and when streams are created
-        - Cluster-wide creation process
+        - Cluster-wide creation internal process
         - Replica allocation and node-selection logic
         - Replica placement rules and hotspot avoidance
     - Update
@@ -14,10 +14,10 @@
     - Cleanup Policies
     - Backup and Restore
     - Criteria for creating separate streams
-    - Leader Step-Down <!-- TODO -->
-        - When and how leader step-down occurs <!-- TODO -->
-        - Operational impact during step-down <!-- TODO -->
-        - Manual vs automatic triggers <!-- TODO -->
+    - Leader Step-Down
+        - When and how leader step-down occurs
+        - Operational impact during step-down
+        - Manual vs automatic triggers
     - Balancing <!-- TODO -->
         - Automatic vs manual balancing behaviours <!-- TODO -->
         - When to invoke balance operations <!-- TODO -->
