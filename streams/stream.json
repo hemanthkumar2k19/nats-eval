@@ -14,7 +14,10 @@
   "max_msg_size": -1,
   "storage": "file",
   "discard": "old",
-  "num_replicas": 3,
+  "num_replicas": 2,
+  "placement": {
+    "tags": ["stream:primary"]
+  },
   "duplicate_window": 120000000000,
   "sealed": false,
   "deny_delete": false,

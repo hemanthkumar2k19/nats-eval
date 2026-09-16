@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-09-16] - Replica Placement via Server Tags
+
+### Changed
+- Added `server_tags: ["stream:primary"]` to [`deploy/local-nats-cluster/nats-1.conf`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/nats-1.conf) and [`deploy/local-nats-cluster/nats-2.conf`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/nats-2.conf). `nats-3` remains untagged to demonstrate exclusion from tag-based placement.
+- Updated [`streams/stream.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/streams/stream.json): reduced `num_replicas` from 3 to 2, added `placement.tags: ["stream:primary"]` to constrain replica nodes to tagged servers only.
+- **Reason**: Demonstrates the `Placement.Tags` capability documented in [`01-03-stream_creation_flow.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/01-03-stream_creation_flow.md) -- client-side control over which cluster nodes host stream replicas.
+- **Affected area**: Server configuration (`nats-1.conf`, `nats-2.conf`), stream configuration (`stream.json`).
+- **Breaking change**: Existing EVENTS stream must be deleted and recreated (`nats stream rm EVENTS --force` then `nats stream add EVENTS --config streams/stream.json`) because replica count cannot be changed in-place.
+
 ## [2026-09-11] - Grafana Dashboard Expansion & Observability Benchmark Testing
 
 ### Added
