@@ -37,11 +37,11 @@
         - Process for adding new nodes to a stream <!-- TODO -->
         - Data sync and catchup behaviour <!-- TODO -->
         - Manual vs automatic and required operator actions <!-- TODO -->
-    - Seal and Unseal <!-- TODO -->
-        - Seal usage and operational meaning <!-- TODO -->
-        - Seal and unseal commands <!-- TODO -->
-        - Existence and behaviour of unseal <!-- TODO -->
-        - Auto-seal/unseal on failures <!-- TODO -->
+    - Seal and Unseal
+        - Seal usage and operational meaning
+        - Seal and unseal commands
+        - Existence and behaviour of unseal
+        - Auto-seal/unseal on failures
 
 2. Storage
     - Storage Capabilities and Operational Details
