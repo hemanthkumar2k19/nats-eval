@@ -42,6 +42,9 @@
         - Seal and unseal commands
         - Existence and behaviour of unseal
         - Auto-seal/unseal on failures
+    - Read and Write Path
+        - Cluster Operation Write - Flow
+        - Cluster Operation Read - Flow
 
 2. Storage
     - Storage Capabilities and Operational Details
@@ -53,13 +56,13 @@
         - Sync timing and performance impact <!-- TODO -->
         - Traffic behaviour during recovery <!-- TODO -->
         - CLI rebalancing or replacement options <!-- TODO -->
-    - Persistent Storage Layout <!-- TODO -->
-        - Directory structure on mounted volumes <!-- TODO -->
-        - Metadata file locations <!-- TODO -->
-        - Stream definition file locations <!-- TODO -->
-        - Message storage file locations <!-- TODO -->
-        - JetStream log file locations <!-- TODO -->
-        - SRE troubleshooting for creation and publish failures <!-- TODO -->
+    - Persistent Storage Layout
+        - Directory structure on mounted volumes
+        - Metadata file locations
+        - Stream definition file locations
+        - Message storage file locations
+        - JetStream log file locations
+        - SRE troubleshooting for creation and publish failures
 
 3. Observability
     - Health

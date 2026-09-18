@@ -8,12 +8,13 @@
 - Node loss and other scenrios
 - Additonal New Node
 
-
-
 ## Internals
 
 # RAFT 
-
+- 3 indexes are tracked
+    - lastIndex: Sequence number of the latest entry appended to the node's Raft WAL.
+    - commitIndex: Highest entry sequence replicated to a Quorum ($R/2 + 1$) of nodes.
+    - appliedIndex (n.applied): Highest Raft entry sequence that has actually been executed/applied into the Stream Store (memStore or fileStore).
 1. Meta Raft Group ($JS.META) — The Control Plane
 What it is: A single cluster-wide Raft group formed by all JetStream servers in the cluster.
 The Meta Raft Leader: The ONE node elected as the leader of this $JS.META group.

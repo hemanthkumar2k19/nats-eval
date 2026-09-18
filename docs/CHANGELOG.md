@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-09-18] - Memory Storage Reference Documentation Clarification
+
+### Changed
+- Updated [`supporting_documentation/streams/storage/memory.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/storage/memory.md) Section 4 and Section 6.1 with clarified Raft identity metadata details (`tav.idx`, `names.dat`/`peer.dat` under `<StoreDir>/$SYS/_js_/<raft_group_name>/`) for clustered memory streams ($R > 1$).
+- Explicitly documented that stream messages, indices, and consumer states produce zero disk footprint under `<StoreDir>/<account>/streams/<stream_name>/`, while small Raft identity metadata (a few bytes) persists to disk so nodes recognize their Raft identity across restarts.
+- **Reason**: Aligns memory storage documentation with exact server behavior and Raft metadata layout.
+- **Affected area**: Documentation (`supporting_documentation/streams/storage/memory.md`).
+
 ## [2026-09-16] - Replica Placement via Server Tags
 
 ### Changed
