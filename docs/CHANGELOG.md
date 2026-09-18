@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-09-18] - Stream Developer Internals & Consistency Refactoring
+
+### Added
+- Created [`supporting_documentation/streams/stream-internals.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/stream-internals.md) as a developer-level reference covering Stream scope, in-memory state pointers (`FirstSeq`, `LastSeq`, `Msgs`, `Bytes`, `dmap`, `psim`), account tenancy boundaries, system-wide S2 compression standards, and `StreamStore` Go interface abstractions.
+
+### Changed
+- Refined [`supporting_documentation/streams/consistency/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/overview.md) to focus 100% on Raft Consensus foundations, relocating developer-level stream pointers and S2 compression into `stream-internals.md`.
+- **Reason**: Separates Raft consensus protocol mechanics from stream-level state data structures.
+- **Affected area**: Documentation (`supporting_documentation/streams/`).
+
 ## [2026-09-18] - Cluster Operations & Administrative Controls Documentation
 
 ### Added

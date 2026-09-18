@@ -1,10 +1,10 @@
 # Stream Consistency & Raft Foundations
 
-JetStream uses single-leader Raft consensus to guarantee strong consistency across replicated streams ($R > 1$). This document details the architectural foundations of NATS JetStream consistency, including stream boundaries, the 2-tier Raft system, internal transport over NATS system subjects, replica placement algorithms, Raft index state management, WAL log structures, quorum mechanics, leader elections, and Go runtime entities.
+JetStream uses single-leader Raft consensus to guarantee strong consistency across replicated streams ($R > 1$). This document details the architectural foundations of NATS JetStream consistency, including the 2-tier Raft architecture, internal transport over NATS system subjects, replica placement algorithms, Raft index state management, WAL log structures, quorum mechanics, leader elections, and Go runtime entities.
 
 ---
 
-## 1. Overview & Stream Boundaries
+## 1. Overview & Consensus Principles
 
 ### 1.1 What Is Consistency in NATS JetStream
 
@@ -13,30 +13,6 @@ In a distributed NATS cluster, stream replicas ($R > 1$) must maintain identical
 - **Single-Leader Model**: For each replicated stream, exactly one server node acts as the Raft Leader. All state mutations (publishes, deletes, purges, consumer ACKs) are processed through the leader.
 - **Log Equivalence**: Replicas maintain identical Raft Write-Ahead Logs (WAL). Log entry order determines state machine execution order across all cluster nodes.
 - **Quorum Commitment**: State updates are committed only after a majority quorum ($Q = \lfloor R/2 \rfloor + 1$) of nodes successfully append the log entry to their local storage.
-
-### 1.2 Core Stream Architectural Properties
-
-- **Uniform Storage Constraint**: All replicas of a stream must share the exact same storage backend type (`storage: "file"` or `storage: "memory"`). Mixed-storage replication (e.g. 2 file nodes and 1 memory node for the same stream) is not permitted.
-- **S2 Standard Compression**: S2 (high-performance Snappy extension) is the official standard compression algorithm used throughout NATS:
-  - JetStream message payload and header compression (`compression: "s2"`)
-  - Raft snapshot chunk transfers over the wire
-  - Stream backup and restore archives (`.tar.s2`)
-  - Internal cluster route and leafnode wire compression
-  - Inflight batch payload compression
-- **Account Tenancy & Scope**: Accounts act as cluster-wide tenant namespaces. Every stream is owned exclusively by a single parent Account. Cross-account access is achieved via NATS Service/Stream Exports and Imports, or Stream Mirrors and Sources, while ownership remains strictly bound to the parent account.
-
-### 1.3 In-Memory Stream State Pointers
-
-Every active stream replica maintains six core state pointers in memory to track stream state and index boundaries:
-
-| Pointer / Field | Description |
-| :--- | :--- |
-| `FirstSeq` / `FirstTime` | Sequence number and nanosecond timestamp of the oldest active message in the stream |
-| `LastSeq` / `LastTime` | Sequence number and nanosecond timestamp of the newest (most recently published) message |
-| `Msgs` | Total count of currently active (non-purged, non-deleted) messages in the stream |
-| `Bytes` | Total aggregate byte size of active message payloads and headers in the stream |
-| `NumDeleted` / `dmap` | AVL tree / set tracking sequence numbers of deleted or purged messages between `FirstSeq` and `LastSeq` |
-| `Subjects` (`psim`) | In-memory radix subject tree tracking `FirstSeq`, `LastSeq`, and message count per subject |
 
 ---
 
