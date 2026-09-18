@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-09-18] - End-to-End Write Path Architecture Documentation Refactoring
+
+### Changed
+- Refactored [`supporting_documentation/streams/consistency/write.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/write.md) into a 2-layer reference document:
+  - **Layer 1 (Architectural Flow & Working Principles)**: High-level protocol-level overview of the 4-phase write path, core design principles (asynchronous batching, single-goroutine loop, post-consensus state mutation, leader-only egress, decoupled consumer signals), and pure ASCII flow diagrams.
+  - **Layer 2 (Go Runtime Mechanics)**: Low-level mapping to `nats-server` Go source files, goroutine boundaries, structures, and function calls (`c.readLoop()`, `queueInbound()`, `internalLoop()`, `node.Propose()`, `applyStreamEntries()`, `fs.StoreRawMsg()`, `mset.outq`, `mset.sch`).
+- **Reason**: Separates high-level architectural concepts from deep Go implementation details for cleaner readability.
+- **Affected area**: Documentation (`supporting_documentation/streams/consistency/write.md`).
+
 ## [2026-09-18] - Stream Developer Internals & Consistency Refactoring
 
 ### Added
