@@ -227,13 +227,68 @@ If cc.isLeader() == false $\rightarrow$ This server node is a Meta Raft Follower
 - Vote Request Subject: $SYS.RAFT.<group_id>.V
 - Replies sent to designated reply subjects ($SYS.RAFT.<group_id>.AR / .VR)
 
-### Log
+### WAL Log
+- Append only on disk
 - Sequential index data: {index, term, Type, Data(Binary)}
 - Physically each node maintains its own local WAL file on disk (`n.wal`)
 - Logical content consistency is enforced across peers via Quorum commit
 
 ### Quorum
 - Floor[n/2] + 1 (e.g., 2 of 3, 3 of 5)
+
+### Flow
+Step 1: Client Publish Request
+Client sends a message payload to subject ORDERS.created.
+Step 2: Leader Receives & Proposes (Propose)
+Node A verifies it is the Leader.
+It wraps the message into a streamMsgOp payload.
+It calls node.Propose(term, payload).
+Node A writes the record to its local Raft WAL at Index 101, Term 2 as Uncommitted.
+Step 3: Replication (AppendEntries)
+Node A broadcasts an AppendEntries RPC containing Log Entry #101 to Node B and Node C.
+Step 4: Follower WAL Write
+Node B receives the entry, verifies Term 2 is valid, appends Log Entry #101 to its local Raft WAL, and sends back an ACK to Node A.
+Node C is slightly slower on network IO.
+Step 5: Quorum Commitment (Commit)
+Node A receives the ACK from Node B.
+Since 2 out of 3 nodes (Node A + Node B) now have Log Entry #101 in their WAL, Majority Quorum is achieved.
+Node A marks Log Entry #101 as COMMITTED.
+Step 6 & 7: State Machine Apply across Servers
+Raft triggers the apply loop (
+
+applyStreamEntries
+).
+Node A and Node B decode streamMsgOp and invoke mset.store.StoreRawMsg(), appending the message to their local FileStore stream storage and assigning sequence number 101.
+(When Node C's ACK eventually arrives or catchup triggers, Node C will also commit and write to its local FileStore).
+Step 8: Client PubAck
+Node A (Leader) constructs the PubAck JSON ({"stream":"ORDERS","seq":101}) and writes it back to the Client TCP socket.
+```bash
+[Client]                [Node A (Leader)]             [Node B (Follower)]          [Node C (Follower)]
+   │                            │                             │                            │
+   │ 1. Publish Msg             │                             │                            │
+   ├───────────────────────────►│                             │                            │
+   │                            │ 2. Propose()                │                            │
+   │                            │    Assign Index 101, Term 2 │                            │
+   │                            │    Write to WAL (Uncommitted)│                           │
+   │                            │                             │                            │
+   │                            │ 3. AppendEntries RPC (101)  │                            │
+   │                            ├────────────────────────────►│                            │
+   │                            ├─────────────────────────────────────────────────────────►│
+   │                            │                             │                            │
+   │                            │                             │ 4. Write 101 to WAL        │
+   │                            │                             │    Send ACK                │
+   │                            │◄────────────────────────────┤                            │
+   │                            │                             │                            │
+   │                            │ 5. MAJORITY REACHED!        │                            │
+   │                            │    (Node A + Node B = 2/3)  │                            │
+   │                            │    Index 101 is COMMITTED   │                            │
+   │                            │                             │                            │
+   │                            │ 6. Apply to Stream Storage  │ 7. Apply to Stream Storage │
+   │                            │    FileStore.WriteMsg(seq)  │    FileStore.WriteMsg(seq) │
+   │                            │                             │                            │
+   │ 8. Send PubAck Response    │                             │                            │
+   │◄───────────────────────────┤                             │                            │
+```
 
 ### Entry and Commit
 1. Proposal (Leader):

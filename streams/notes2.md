@@ -28,10 +28,52 @@
 
 ## Cluster Operations
 
-### Write
+### Publishing
+1. Normal Publishing (streamMsgOp)
+Behavior: Each message published by a client is handled as an independent transaction.
+Flow: Client sends Msg A $\rightarrow$ Proposed to Raft $\rightarrow$ Committed $\rightarrow$ Written to Disk $\rightarrow$ PubAck sent.
+Characteristics:
+Every message has its own Raft entry and disk flush cycle.
+If a client publishes 100 messages, it creates 100 individual Raft proposals and commits.
+2. Atomic Batch Publishing (batchMsgOp & batchCommitMsgOp)
+Behavior: A client sends a group of messages under a single batch transaction identifier (batchId).
+Key Differences:
+All-Or-Nothing Atomicity: The entire batch of messages is applied as a single atomic unit. If the server crashes or the batch is interrupted mid-stream, the incomplete batch is rolled back (rejectBatchState()).
+Consumer Read Isolation: Consumers cannot see or fetch any message in the batch until the entire batch has been fully committed (mset.isolateMu).
+High Throughput: Instead of paying the Raft consensus and disk sync cost per message, multiple messages share a single Raft commitment and storage write cycle.
+
+### Operations List
+- NATS operates with 2 layers of Opcodes
+```bash
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │ Layer 1: Low-Level Raft Entry Types (EntryType in raft.go)            │
+ │ (Controls the Raft Cluster Protocol itself)                            │
+ │  - EntryNormal     : Holds application data (payload below)            │
+ │  - EntrySnapshot   : Signals a state snapshot compacting the log      │
+ │  - EntryPeerState  : Peer metadata / term updates                      │
+ │  - EntryCatchup    : Sent to lagging followers to bring them up to date│
+ │  - EntryAddPeer    : Node added to cluster                             │
+ │  - EntryRemovePeer : Node removed from cluster                          │
+ └───────────────────────────────────┬────────────────────────────────────┘
+                                     │ Carried inside EntryNormal.Data
+                                     ▼
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │ Layer 2: JetStream Application Ops (entryOp in jetstream_cluster.go)  │
+ │ (Controls Stream and Consumer State Machine)                           │
+ │  - streamMsgOp / compressedStreamMsgOp                                 │
+ │  - purgeStreamOp / deleteMsgOp / deleteRangeOp                         │
+ │  - updateDeliveredOp / updateAcksOp / updateSkipOp                     │
+ │  - assignStreamOp / removeStreamOp / updateStreamOp                   │
+ └────────────────────────────────────────────────────────────────────────┘
+```
+
+### Go Internals
 - internalLoop() - Single Dedicated Goroutine for all stream I/O
 - Create Internal Stream Client and init Messages Channel(InBound)
 - Select + Case for Checking for Message
 - Get all messages in the queue for processing
+
+
+
 
 

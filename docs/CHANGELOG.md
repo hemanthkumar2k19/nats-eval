@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-09-18] - Cluster Operations & Administrative Controls Documentation
+
+### Added
+- Created [`supporting_documentation/streams/lifecycle/cluster-operations/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/overview.md) detailing storage durability policies (`SyncAlways` vs `SyncOnFlush`), emergency quorum overrides (`RescueQuorum`), peer eviction (`EvictPeers` / `ProposeRemovePeer`), apply channel controls (`PauseApply` / `ResumeApply`), read-only observer mode (`SetObserver`), and Meta Leader automated self-healing reconciliation (`meta.reconcile`).
+- Created [`supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md) detailing operational impact, automatic vs manual stepdown triggers, `$JS.API.STREAM.LEADER.STEPDOWN.*` handler guard checks, and internal Raft transfer mechanics (`raft.StepDown`, `EntryLeaderTransfer`, `CampaignImmediately` 10ms timer).
+- **Reason**: Consolidates cluster operations and administrative controls into a dedicated subfolder structure under `supporting_documentation/streams/lifecycle/cluster-operations/`.
+- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/`).
+
+## [2026-09-18] - Stream Consistency & Cluster Operations Reference Documentation
+
+### Added
+- Created [`supporting_documentation/streams/consistency/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/overview.md) detailing NATS JetStream single-leader Raft consensus, transport over internal NATS subjects (`$JSC.SYNC...`), 2-tier Raft architecture (`$JS.META` vs Stream Raft groups), index tracking (`lastIndex`, `commitIndex`, `appliedIndex`), WAL structure, majority quorum mechanics, leader elections, and core Go runtime entities (`s`, `acc`, `js`, `cc`).
+- Refactored [`supporting_documentation/streams/consistency/operation-flow.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/operation-flow.md) into a multi-layered reference document detailing Layer 1 Raft Entry Types (`EntryType`) vs Layer 2 JetStream Application Ops (`entryOp`), the unified 5-stage operation pipeline, operation deep dives (normal publishing, atomic batching with read isolation and rollback, deletes, purges, consumer state updates), stream leadership stepdown API (`$JS.API.STREAM.LEADER.STEPDOWN.*`), and internal loop concurrency (`internalLoop()`).
+- **Reason**: Consolidates research and code-exploration notes into structured enterprise-grade reference documents.
+- **Affected area**: Documentation (`supporting_documentation/streams/consistency/`).
+
 ## [2026-09-18] - Memory Storage Reference Documentation Clarification
 
 ### Changed
