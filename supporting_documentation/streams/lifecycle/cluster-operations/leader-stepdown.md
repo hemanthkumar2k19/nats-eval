@@ -6,14 +6,14 @@ A client or operator requests leadership transfer for a specific stream by publi
 
 ## 1. Triggers & Operator Actions
 
-Stream leadership stepdown can be initiated through manual client/CLI API commands or automated server engine conditions:
+Stream leadership stepdown can be initiated through three distinct pathways:
 
 ```mermaid
 flowchart TD
     subgraph Triggers["Trigger Pathways"]
-        T1["1. Manual Client API / Admin CLI Request\nCLI: nats stream cluster step-down ORDERS [--peer nats-2]\nSubject: $JS.API.STREAM.LEADER.STEPDOWN.<stream>"]
-        T2["2. Automated Server Storage / Quorum Failure\nTriggers: Storage Write Error (handleStorageError) or Raft Quorum Loss (lostQuorumLocked)"]
-        T3["3. Automated Stream Evacuation / Server Shutdown\nTriggers: Stream Move/Evacuation (peerEvacuate) or Node Shutdown (s.shutdown())"]
+        T1["1. Manual Client API / Admin CLI Request\nTrigger: Client or operator issues stepdown command\nCLI: nats stream cluster step-down ORDERS [--peer nats-2]"]
+        T2["2. Automated Storage or Quorum Failure\nTrigger: Server engine detects disk write error or Raft quorum loss\nAction: Server automatically demotes leader to follower state"]
+        T3["3. Automated Stream Evacuation / Server Shutdown\nTrigger: Operator initiates node drain/evacuation or server shutdown\nAction: NATS executes StepDown before node stops"]
     end
 
     T1 --> Process["Leader Step-Down Process"]
@@ -25,9 +25,9 @@ flowchart TD
 
 | Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
 | :--- | :--- | :--- | :--- |
-| **Manual Step-Down** | Operator / CLI | Run `nats stream cluster step-down <stream> [--peer target]` | Initiates fast-track leadership transfer to target or optimal follower |
+| **Manual Step-Down** | Operator / Client | Run `nats stream cluster step-down <stream> [--peer target]` | Initiates fast-track leadership transfer to target peer or optimal follower |
 | **Storage / Quorum Failure** | Server Engine | **Zero operator action required** | Automatically demotes faulty leader on disk error or quorum loss to protect stream consistency |
-| **Stream Move / Evacuation** | Operator / System | Run stream evacuation command or trigger node shutdown | Automatically executes `StepDown` before node shutdown to prevent election delays |
+| **Stream Evacuation / Shutdown** | Operator / System | Run node evacuation command or issue server shutdown signal | Automatically executes graceful `StepDown` before node shutdown to prevent election delays |
 
 ---
 
@@ -35,7 +35,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Trigger["Step-Down Trigger Event\n(API Request / Storage Error / Server Shutdown)"] --> Step1
+    Trigger["Trigger Event\n(API Request / Storage Error / Server Shutdown)"] --> Step1
 
     subgraph Step1["1. Pre-Condition Guard Checks"]
         S1["- Verify JetStream enabled, clustered, & Meta Leader online\n- Verify stream registry assignment and quorum liveness\n- Reject invalid API requests (JSClusterRequiredError)"]
@@ -132,10 +132,10 @@ flowchart TD
 
 ## 4. Operational & Performance Impact During Operation
 
-| Operational Dimension | Graceful StepDown (~10ms - 50ms) | Unplanned Failure (1.5s - 3.0s) | Detailed Behavioral Characteristics |
-| :--- | :--- | :--- | :--- |
-| **Client Publishes** | Briefly buffered (~10ms) | Error / Timeout (1.5s - 3s) | During graceful stepdown, client publishes buffer briefly in SDK memory and succeed immediately without client-facing errors |
-| **Message Storage (WAL)** | Flushed to disk before transfer | Flushed if clean stop; uncommitted lost if crash | Stepping-down leader flushes pending WAL entries before demoting to follower |
-| **Consumer Delivery** | Momentary pause (~10ms) | Delivery pause until election | Consumer delivery pauses briefly during handover and resumes immediately under new leader |
-| **Duplicate Delivery Risk** | Low / Minimal | Low / Moderate | Any unacknowledged inflight messages are re-delivered by new leader; consumer deduplication handles repeats |
-| **Mirrors & Sources** | Auto-reconnect (~10ms) | Auto-reconnect after election | Internal fetch loops pause momentarily and reconnect to new leader subject endpoint |
+| Operational Dimension | Impact Level | Detailed Behavioral Characteristics |
+| :--- | :--- | :--- |
+| **Client Publish Latency** | Low / Minimal (~10ms - 50ms) | Client publishes buffer briefly during transfer (~10ms) and succeed without returning errors (contrasted with 1.5s - 3.0s timeout during unplanned crash) |
+| **Message Storage (WAL)** | Zero Loss | Stepping-down leader flushes pending WAL entries to disk before demoting to follower |
+| **Consumer Delivery** | Momentary Pause (~10ms) | Consumer delivery pauses briefly during handover (~10ms) and resumes immediately under the new leader |
+| **Duplicate Delivery Risk** | Low / Minimal | Any unacknowledged inflight messages are re-delivered by the new leader; consumer deduplication handles repeats |
+| **Mirrors & Sources** | Auto-Reconnect (~10ms) | Internal fetch loops pause momentarily and automatically reconnect to the new leader subject endpoint |
