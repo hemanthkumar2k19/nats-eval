@@ -1,26 +1,44 @@
 # Changelog
 
-## [2026-09-18] - Stream Cluster Operations Reference Documentation Standardization
+## [2026-09-18] - Stream Cluster Operations & Consistency Documentation Refactoring
 
-### Added
-- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/balancing.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/balancing.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix).
-- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/remove-node.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/remove-node.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix).
-- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix comparing Graceful vs Unplanned stepdown).
-- Replaced all text-based flow diagrams across cluster operations documentation (`add-node.md`, `remove-node.md`, `leader-stepdown.md`, `balancing.md`) with clean, interactive `mermaid` flowchart blocks.
-- **Reason**: Standardizes layout and improves diagram editability and rendering quality across all stream cluster operations documentation.
-- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/`).
+### Changed
+- Refactored [`supporting_documentation/streams/consistency/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/overview.md):
+  - Converted Section 2.1 transport bus diagram to an interactive Mermaid **Sequence Diagram** (`sequenceDiagram`).
+  - Converted Section 3 2-tier Raft architecture diagram to a clean Mermaid **Flowchart** (`flowchart TD`).
+  - Removed duplicate Section 4 (`cc.selectPeerGroup` node selection pipeline), as peer allocation is documented in detail within the Stream Creation Journey guide.
+- Refactored [`supporting_documentation/streams/consistency/operation-flow.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/consistency/operation-flow.md):
+  - Consolidated 2-tier opcodes (`EntryType` vs `entryOp`) into two structured markdown tables without data loss.
+  - Replaced text-based 5-stage pipeline diagram with an interactive Mermaid **Sequence Diagram** (`sequenceDiagram`).
+  - Converted `internalLoop()` text block diagram in Section 4 into a clean Go code snippet (`go`).
+  - Removed redundant 2-tier Raft overview section (already covered in `overview.md`).
+  - Removed redundant stepdown flow section (already covered in `leader-stepdown.md`).
+  - Streamlined step-by-step publish sequence text while removing duplicate text diagram.
+- **Reason**: Eliminates documentation redundancy across consistency guides and improves diagram visualization quality.
+- **Affected area**: Documentation (`supporting_documentation/streams/consistency/`).
 
 ## [2026-09-18] - Stream Replica Scale-Up & Peer Addition Reference Documentation
 
 ### Added
 - Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/add-node.md) into 4 distinct sections:
-  - **Section 1 (Triggers & Operator Actions)**: Manual Client API scale-up, CLI peer addition, `$JS.META` self-healing, operator action matrix, and interactive Mermaid flowchart.
-  - **Section 2 (Layer 1: Conceptual Flow & Working Principles)**: 5-step interactive Mermaid flowchart, non-blocking catchup, S2 snapshot streaming, and dynamic quorum expansion ($Q = \lfloor R/2 \rfloor + 1$).
+  - **Section 1 (Triggers & Operator Actions)**: Manual Client API scale-up, CLI peer addition, `$JS.META` self-healing, and operator action matrix table (Section 1 diagram removed for clean tabular representation).
+  - **Section 2 (Layer 1: Conceptual Flow & Working Principles)**: 5-step interactive Mermaid sequence diagram (`sequenceDiagram`) detailing participant interactions (`Operator`, `Meta Leader`, `Target Node`, `Stream Leader`, `Raft Quorum`), non-blocking catchup, S2 snapshot streaming, and dynamic quorum expansion ($Q = \lfloor R/2 \rfloor + 1$).
   - **Section 3 (Layer 2: Go Runtime Implementation Mechanics)**: Deep dive mapping to `nats-server` Go files and functions (`s.jsClusteredStreamUpdateRequestLocked()`, `n.ProposeAddPeer()`, `InstallSnapshot()`, `n.recalcQuorum()`).
   - **Section 4 (Operational & Performance Impact)**: Comprehensive impact analysis matrix (Client Publish Latency, Network Bandwidth, Leader CPU, Leader Disk I/O, Quorum Availability, Memory Headroom).
-- Updated text-based ASCII flow diagrams in `add-node.md` to standard Mermaid `flowchart TD` blocks to improve visualization, editing, and rendering.
 - Updated [`supporting_documentation/streams/lifecycle/cluster-operations/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/overview.md) summary matrix with peer addition and scale-up controls.
-- **Reason**: Enhances diagram editability and rendering quality by converting ASCII text boxes to Mermaid flowcharts in `add-node.md`.
+- **Reason**: Enhances visualization by using a Mermaid sequence diagram for conceptual flow and relying on a clean comparison table for triggers in `add-node.md`.
+- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`).
+
+## [2026-09-18] - Stream Replica Scale-Up & Peer Addition Reference Documentation
+
+### Added
+- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/add-node.md) into 4 distinct sections:
+  - **Section 1 (Triggers & Operator Actions)**: Manual Client API scale-up, CLI peer addition, `$JS.META` self-healing, and operator action matrix table (Section 1 diagram removed for clean tabular representation).
+  - **Section 2 (Layer 1: Conceptual Flow & Working Principles)**: 5-step interactive Mermaid sequence diagram (`sequenceDiagram`) detailing participant interactions (`Operator`, `Meta Leader`, `Target Node`, `Stream Leader`, `Raft Quorum`), non-blocking catchup, S2 snapshot streaming, and dynamic quorum expansion ($Q = \lfloor R/2 \rfloor + 1$).
+  - **Section 3 (Layer 2: Go Runtime Implementation Mechanics)**: Deep dive mapping to `nats-server` Go files and functions (`s.jsClusteredStreamUpdateRequestLocked()`, `n.ProposeAddPeer()`, `InstallSnapshot()`, `n.recalcQuorum()`).
+  - **Section 4 (Operational & Performance Impact)**: Comprehensive impact analysis matrix (Client Publish Latency, Network Bandwidth, Leader CPU, Leader Disk I/O, Quorum Availability, Memory Headroom).
+- Updated [`supporting_documentation/streams/lifecycle/cluster-operations/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/overview.md) summary matrix with peer addition and scale-up controls.
+- **Reason**: Enhances visualization by using a Mermaid sequence diagram for conceptual flow and relying on a clean comparison table for triggers in `add-node.md`.
 - **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`).
 
 ## [2026-09-18] - End-to-End Write Path Architecture Documentation Refactoring

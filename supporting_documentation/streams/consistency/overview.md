@@ -1,6 +1,6 @@
 # Stream Consistency & Raft Foundations
 
-JetStream uses single-leader Raft consensus to guarantee strong consistency across replicated streams ($R > 1$). This document details the architectural foundations of NATS JetStream consistency, including the 2-tier Raft architecture, internal transport over NATS system subjects, replica placement algorithms, Raft index state management, WAL log structures, quorum mechanics, leader elections, and Go runtime entities.
+JetStream uses single-leader Raft consensus to guarantee strong consistency across replicated streams ($R > 1$). This document details the architectural foundations of NATS JetStream consistency, including the 2-tier Raft architecture, internal transport over NATS system subjects, Raft index state management, WAL log structures, quorum mechanics, leader elections, and Go runtime entities.
 
 ---
 
@@ -30,30 +30,19 @@ $JSC.SYNC.<unique_inbox>.<node_id>
 
 This subject acts as a dedicated private virtual bus for all Raft nodes assigned to host that stream.
 
-```text
-  +---------------------------------------+
-  |    Stream Raft Leader (Node-A)        |
-  +-------------------+-------------------+
-                      |
-                      | Publish AppendEntries / Heartbeat
-                      |
-                      +---------------------------------------+
-                      |                                       |
-                      v                                       v
-         Subject: $JSC.SYNC.v9x7K2.Node-B        Subject: $JSC.SYNC.v9x7K2.Node-C
-                      |                                       |
-                      v                                       v
-  +-------------------+-------------------+   +---------------+-------------------+
-  |   Stream Replica (Node-B)             |   |   Stream Replica (Node-C)             |
-  |   Subscribed on:                      |   |   Subscribed on:                      |
-  |   $JSC.SYNC.v9x7K2.Node-B             |   |   $JSC.SYNC.v9x7K2.Node-C             |
-  +-------------------+-------------------+   +---------------+-------------------+
-                      |                                       |
-                      +-------------------+-------------------+
-                                          |
-                                          | Follower ACKs
-                                          v
-                              Subject: $JSC.R.v9x7K2
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Leader as Stream Leader (Node-A)
+    participant NodeB as Replica (Node-B)
+    participant NodeC as Replica (Node-C)
+
+    Leader->>NodeB: Publish AppendEntries / Heartbeat ($JSC.SYNC.v9x7K2.Node-B)
+    Leader->>NodeC: Publish AppendEntries / Heartbeat ($JSC.SYNC.v9x7K2.Node-C)
+    Note over NodeB,NodeC: Replicas write WAL entry & verify term
+    NodeB-->>Leader: Send Follower ACK ($JSC.R.v9x7K2)
+    NodeC-->>Leader: Send Follower ACK ($JSC.R.v9x7K2)
+    Note over Leader: Majority Quorum Reached (Q=2/3) -> Mark COMMITTED
 ```
 
 ### 2.2 Replication Protocol over System Subjects
@@ -76,24 +65,22 @@ This subject acts as a dedicated private virtual bus for all Raft nodes assigned
 
 NATS JetStream separates control plane cluster management from data plane stream processing using two distinct layers of Raft groups:
 
-```text
-                  +-------------------------------------------+
-                  |    Meta Raft Group ($JS.META)             |
-                  |  (Stream/Consumer Creation, Placement,    |
-                  |   Cluster Topology, Scale Up/Down)        |
-                  +---------------------+---------------------+
-                                        | Spawns & Manages
-             +--------------------------+--------------------------+
-             |                                                     |
-             v                                                     v
-+--------------------------+                             +--------------------------+
-| Stream Raft Group (R=3)  |                             | Stream Raft Group (R=3)  |
-|  "ORDERS"                |                             |  "EVENTS"                |
-|  Operations:             |                             |  Operations:             |
-|  - Publish / Batch Msg   |                             |  - Publish / Batch Msg   |
-|  - Delete / Purge Msg    |                             |  - Delete / Purge Msg    |
-|  - Ack / Deliver State   |                             |  - Ack / Deliver State   |
-+--------------------------+                             +--------------------------+
+```mermaid
+flowchart TD
+    subgraph Meta["Control Plane: Meta Raft Group ($JS.META)"]
+        M1["- Stream & Consumer Creation/Deletion\n- Node Resource Quotas & Cluster Topology\n- Replica Placement Scoring (cc.selectPeerGroup)"]
+    end
+
+    Meta -- "Spawns & Manages" --> Stream1
+    Meta -- "Spawns & Manages" --> Stream2
+
+    subgraph Stream1["Data Plane: ORDERS Stream Raft Group (R=3)"]
+        S1["- Single-Leader Raft Consensus (mset.node)\n- Message Publishes, Batches, Deletes, & Purges\n- Consumer Delivery & ACK State Tracking"]
+    end
+
+    subgraph Stream2["Data Plane: EVENTS Stream Raft Group (R=3)"]
+        S2["- Single-Leader Raft Consensus (mset.node)\n- Message Publishes, Batches, Deletes, & Purges\n- Consumer Delivery & ACK State Tracking"]
+    end
 ```
 
 ### 3.1 Meta Raft Group ($JS.META) - Control Plane
@@ -116,64 +103,7 @@ NATS JetStream separates control plane cluster management from data plane stream
 
 ---
 
-## 4. Replica Allocation & Node Selection Pipeline (`cc.selectPeerGroup`)
-
-When a stream is created or scaled in a cluster, the Meta Raft Leader invokes `js.createGroupForStream` to select the physical server nodes that will host the stream's Raft group. The decision algorithm (`cc.selectPeerGroup`) executes a 2-stage pipeline:
-
-```text
-Candidates (meta.Peers) -> Random Shuffle (rand.Shuffle)
-                                  |
-                                  v
-                       Hard Filtering Phase
-     (Discard: Offline, Tag Mismatch, Insufficient Disk/RAM,
-      MaxHAAssets Limit, Duplicate Unique Tag / Same Rack)
-                                  |
-                                  v
-                        Candidate Pool (wn)
-                                  |
-                                  v
-                    Weighted Scoring & Sorting Phase
-     (Sort by: Online Status -> HA Asset Count (ha) ->
-      Available Storage (avail) -> Total Stream Count (ns))
-                                  |
-                                  v
-                    Pick Top R Nodes for Raft Group
-```
-
-### 4.1 Stage 1: Candidate Shuffling & Hard Filtering Rules
-
-The candidate list is randomized (`rand.Shuffle`) to prevent tie-breaking bias toward the first registered cluster server. Candidate nodes are evaluated against 6 hard placement rules:
-
-1. **Liveness & Target Cluster**: Node must belong to the target cluster (`ni.cluster == cluster`) and be active and online (`ni.selectable()`).
-2. **Explicit Exclusion Tags**: Nodes bearing the `!jetstream` tag (`jsExcludePlacement`) are skipped.
-3. **User Placement Tags (`Placement.Tags`)**:
-   - Mandatory tags (e.g., `cloud:aws`): Node must possess the tag.
-   - Excluded tags (e.g., `!rack:us-east-1c`): Node carrying the tag is discarded.
-4. **Storage Capacity Constraints**: Node must have sufficient unreserved storage space for `cfg.MaxBytes`. If `MaxBytes` exceeds available disk or memory, the node is skipped.
-5. **HA Assets Cap**: If `JetStreamLimits.MaxHAAssets` is set, nodes exceeding this count are discarded.
-6. **Fault Domain & Anti-Affinity Enforcement (`JetStreamUniqueTag`)**: Configured via `uniqueTagPrefix` (e.g., `"rack:"` or `"zone:"`). Function `checkUniqueTag` guarantees that **no two replicas of the same stream share the same unique tag value** (e.g., two replicas cannot land on `rack:A`).
-
-### 4.2 Stage 2: Weighted Scoring & Load Balancing
-
-To prevent hot-spotting specific servers, NATS calculates real-time resource density for remaining candidates:
-
-- **`peerStreams` (`ns`)**: Total number of streams assigned to the node.
-- **`peerHA` (`ha`)**: Total number of high-availability ($R > 1$) streams/consumers assigned to the node.
-
-#### Sorting Priority Order
-
-1. **Online Status**: Online servers strictly preferred over offline servers.
-2. **HA Asset Density (`ha` ascending)**: `slices.SortStableFunc` sorts candidate nodes by HA asset count. Nodes hosting fewer replicated streams are prioritized.
-3. **Available Storage (`avail` descending)**: Nodes with the most available free disk/memory space are ranked higher.
-4. **Total Stream Count (`ns` ascending)**: Tie-breaker prioritizing nodes hosting fewer total streams.
-
-### 4.3 Multi-Cluster Fallback Retry
-
-If placement fails on the primary cluster due to `JSInsufficientResourcesErr`, `processStreamAssignmentResults` automatically inspects `ci.Alternates` and attempts to retry `createGroupForStream` on alternate clusters within the account's placement configuration.
-
----
-
-## 5. Core Raft Concepts & Index Tracking
+## 4. Core Raft Concepts & Index Tracking
 
 Every Raft node maintains three sequence indexes to track consensus progress:
 
@@ -197,9 +127,9 @@ appliedIndex <= commitIndex <= lastIndex
 
 ---
 
-## 6. Raft Write-Ahead Log (WAL) & Transport Mechanics
+## 5. Raft Write-Ahead Log (WAL) & Transport Mechanics
 
-### 6.1 Log Frame Structure
+### 5.1 Log Frame Structure
 
 The Raft Write-Ahead Log is an append-only sequential file on disk (`n.wal`) or memory structure (`memStore`). Each log entry contains four fields:
 
@@ -214,12 +144,12 @@ The Raft Write-Ahead Log is an append-only sequential file on disk (`n.wal`) or 
 - **Type**: 1-byte protocol entry type (`EntryNormal`, `EntrySnapshot`, `EntryPeerState`, `EntryCatchup`, `EntryAddPeer`, `EntryRemovePeer`).
 - **Data**: Binary payload. For `EntryNormal`, this contains the JetStream application header (`entryOp`) followed by operation data.
 
-### 6.2 Physical Storage & Resilience
+### 5.2 Physical Storage & Resilience
 
 - **Disk Streams (`storage: "file"`)**: Log entries are appended to disk (`n.wal`). On node crash, uncommitted entries beyond `commitIndex` can be truncated, but committed entries remain durable on disk.
 - **Memory Streams (`storage: "memory"`)**: Log entries are stored in RAM (`memStore`). On restart, the local WAL is lost, and the node relies on snapshot catchup from active Raft peers.
 
-### 6.3 Network Messaging Protocols
+### 5.3 Network Messaging Protocols
 
 Raft consensus protocol frames are exchanged over dedicated system subjects:
 
@@ -231,9 +161,9 @@ Raft consensus protocol frames are exchanged over dedicated system subjects:
 
 ---
 
-## 7. Quorum & Consensus Calculations
+## 6. Quorum & Consensus Calculations
 
-### 7.1 Quorum Formula
+### 6.1 Quorum Formula
 
 Raft requires a majority quorum to elect leaders and commit log entries:
 
@@ -245,15 +175,15 @@ $$Q = \lfloor R/2 \rfloor + 1$$
 | 3 | 2 | 1 |
 | 5 | 3 | 2 |
 
-### 7.2 Fault Tolerance Limits
+### 6.2 Fault Tolerance Limits
 
 To tolerate $F$ node failures, a stream must be configured with at least $R = 2F + 1$ replicas. If node failures reduce active replicas below quorum $Q$, the stream enters a read-only or unavailable state, rejecting write operations with `503 No Leader Available`.
 
 ---
 
-## 8. Leader Election & Heartbeat Dynamics
+## 7. Leader Election & Heartbeat Dynamics
 
-### 8.1 Campaign Execution
+### 7.1 Campaign Execution
 
 When a node initiates a leadership election (transition to Candidate state):
 
@@ -266,13 +196,13 @@ When a node initiates a leadership election (transition to Candidate state):
    - Candidate log is at least as up-to-date as the peer's log (`lastTerm` and `lastIndex`).
 5. **Election Victory**: If votes $\ge Q$, the candidate transitions to Leader (`switchToLeader()`) and broadcasts `sendPeerState` to announce leadership and synchronize peer topology.
 
-### 8.2 Heartbeats & Liveness
+### 7.2 Heartbeats & Liveness
 
 - **Heartbeat Interval**: The active leader periodically (every 1 second) broadcasts `sendHeartbeat()` (an empty `AppendEntries` frame).
 - **Follower Election Timer**: Followers reset their randomized election timer (1.5s - 3.0s) upon receiving any valid `AppendEntries` or heartbeat frame.
 - **Quorum Verification**: The leader periodically checks `lostQuorumLocked()`. If a majority of peers fail to ACK heartbeats, the leader voluntarily steps down (`stepdown`) to prevent split-brain scenarios.
 
-### 8.3 Re-Election Pathways
+### 7.3 Re-Election Pathways
 
 #### Voluntary Stepdown (Graceful / `CampaignImmediately`)
 
@@ -289,7 +219,7 @@ When a node initiates a leadership election (transition to Candidate state):
 
 ---
 
-## 9. Go Runtime Core Entities
+## 8. Go Runtime Core Entities
 
 Inside the `nats-server` codebase, stream consistency and cluster orchestration are managed by four core Go structures:
 
@@ -307,14 +237,14 @@ s (*Server) -- Node Level Daemon
               +-- cc.meta (*raftNode) -- Participant in $JS.META Group
 ```
 
-### 9.1 Entity Descriptions
+### 8.1 Entity Descriptions
 
 1. **`s (*Server)`**: Represents the single `nats-server` process daemon. Owns TCP client listeners, server options, route mesh sockets, and the `s.js` pointer.
 2. **`acc (*Account)`**: Represents a multi-tenant account boundary (e.g., `$SYS`, `PAYMENTS`). Holds authorization rules, user limits, and local stream lookups.
 3. **`js (*jetStream)`**: The local JetStream subsystem controller running on the server node. Manages storage engines and contains the cluster controller pointer (`js.cluster`).
 4. **`cc (*jetStreamCluster)`**: The cluster controller present on every JetStream-enabled server node. Holds `cc.meta` (this node's local participant instance in the Meta Raft Group `$JS.META`).
 
-### 9.2 Checking Leader Status
+### 8.2 Checking Leader Status
 
 To determine if the local server node is the active Meta Raft Leader, NATS executes:
 

@@ -8,19 +8,6 @@ The NATS JetStream write path connects client TCP publishers to distributed Raft
 
 Message writes into a JetStream stream can be initiated through three distinct pathways:
 
-```mermaid
-flowchart TD
-    subgraph Triggers["Trigger Pathways"]
-        T1["1. Standard Client Publish (PUB / HPUB)\nTrigger: Client sends NATS protocol message to stream subject\nTarget: Stream ingress subject matching account subscription"]
-        T2["2. Direct Get / JetStream API Publish\nTrigger: Client sends JSON payload to $JS.API.STREAM.MSG.PUB.<stream>\nTarget: JetStream API request handler"]
-        T3["3. Stream Mirror / Source Auto-Ingestion\nTrigger: Background worker fetches messages from upstream mirror/source\nTarget: Internal stream ingress pipeline"]
-    end
-
-    T1 --> Process["JetStream Write Pipeline"]
-    T2 --> Process
-    T3 --> Process
-```
-
 ### 1.1 Trigger Comparison & Ingress Characteristics
 
 | Trigger Pathway | Initiator | Protocol / Subject | Operational Processing |
@@ -34,30 +21,28 @@ flowchart TD
 ## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
 ```mermaid
-flowchart TD
-    Client["Client TCP Publisher"] --> Phase1
+sequenceDiagram
+    autonumber
+    actor Client as Client Publisher
+    participant Ingress as Network Ingress (c.readLoop)
+    participant StreamLoop as Stream Event Loop (internalLoop)
+    participant Leader as Stream Raft Leader
+    participant Followers as Follower Replicas
+    participant Storage as Storage Engine (FileStore)
 
-    subgraph Phase1["1. Network Ingress & Protocol Routing"]
-        P1["- Read NATS protocol frame (PUB subject reply length)\n- Resolve subject mapping via internal account sublist\n- Package into jsPubMsg struct"]
-    end
-
-    Phase1 --> Phase2
-
-    subgraph Phase2["2. Stream Queueing & Event Loop Batching"]
-        P2["- Buffer message into lock-free inbound queue (ipQueue)\n- Wake stream dedicated event loop (internalLoop)\n- Drain pending queue batch in a single slice"]
-    end
-
-    Phase2 --> Phase3
-
-    subgraph Phase3["3. Raft Consensus & Replication Barrier"]
-        P3["- Stream Leader verifies stream limits, state, & sealed status\n- Propose entry to Leader Write-Ahead Log (WAL)\n- Broadcast AppendEntries to Followers over cluster mesh\n- Majority Quorum Reached (R/2 + 1) -> Entry COMMITTED"]
-    end
-
-    Phase3 -- "Entry Committed" --> Phase4
-
-    subgraph Phase4["4. Storage Engine Persistence & Egress"]
-        P4["- Apply committed log entry to local Stream Storage (FileStore/MemStore)\n- Append block segment (1.blk), update index & deduplication map\n- Send PubAck JSON response to client (Leader Only)\n- Signal active consumer workers for real-time delivery"]
-    end
+    Client->>Ingress: 1. Send PUB frame over TCP socket
+    Ingress->>Ingress: Resolve subject match & package jsPubMsg
+    Ingress->>StreamLoop: Push to lock-free queue (ipQueue) & wake loop
+    StreamLoop->>StreamLoop: 2. Drain batch slice (msgs.pop)
+    StreamLoop->>Leader: 3. Verify limits & call node.Propose(esm)
+    Leader->>Leader: Append entry to Leader WAL (n.wal)
+    Leader->>Followers: Broadcast AppendEntries over $SYS.RAFT
+    Followers-->>Leader: Append to WAL & reply with ACK
+    Leader->>Leader: Majority Quorum Reached -> Mark COMMITTED
+    Leader->>Storage: 4. Apply committed log entry (fs.StoreRawMsg)
+    Note over Storage: Appends block file (1.blk) & updates index/dmap
+    Leader->>Client: Send PubAck JSON response over TCP
+    Leader->>StreamLoop: Signal active consumer workers (mset.sch)
 ```
 
 ### 2.1 Core Architectural Working Principles
@@ -73,31 +58,6 @@ flowchart TD
 ## 3. Layer 2: Go Runtime Implementation Mechanics
 
 This section maps the 4-phase write pipeline directly to `nats-server` Go source files, goroutine boundaries, structures, and function calls.
-
-```mermaid
-flowchart TD
-    subgraph Phase1["Phase 1: Ingress (Client Goroutine - server/client.go)"]
-        F1["c.readLoop() -> c.parse() -> acc.sl.Match() -> processInboundJetStreamMsg()"]
-    end
-
-    Phase1 --> Phase2
-
-    subgraph Phase2["Phase 2: Queueing (Stream Goroutine - server/stream.go)"]
-        F2["queueInbound() -> mset.msgs.push() -> internalLoop() -> msgs.pop()"]
-    end
-
-    Phase2 --> Phase3
-
-    subgraph Phase3["Phase 3: Consensus (Raft Engine - server/jetstream_cluster.go & server/raft.go)"]
-        F3["processClusteredInboundMsg() -> node.Propose() -> AppendEntries -> Quorum Commit"]
-    end
-
-    Phase3 --> Phase4
-
-    subgraph Phase4["Phase 4: Storage & Egress (Apply Loop - server/filestore.go & server/stream.go)"]
-        F4["applyStreamEntries() -> fs.StoreRawMsg() -> mset.outq.push() -> mset.sch signal"]
-    end
-```
 
 ### 3.1 Phase 1: Network Ingress & Protocol Parsing
 

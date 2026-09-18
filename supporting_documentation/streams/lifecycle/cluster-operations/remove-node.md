@@ -8,19 +8,6 @@ Removing a node or scaling down stream replicas in NATS JetStream shrinks fault 
 
 Stream replica scale-down or peer removal can be initiated through three distinct pathways:
 
-```mermaid
-flowchart TD
-    subgraph Triggers["Trigger Pathways"]
-        T1["1. Manual Client API / Config Scale-Down\nTrigger: Client or operator updates stream config (num_replicas: 1)\nCLI: nats stream update ORDERS --replicas=1"]
-        T2["2. Manual Administrative Peer Eviction\nTrigger: Operator manually targets a specific cluster node for removal\nCLI: nats stream cluster peer remove ORDERS nats-2"]
-        T3["3. Automated Meta-Leader Self-Healing\nTrigger: Meta Leader ($JS.META) detects node crash or disk loss (> peerUnbusyTimeout)\nAction: Meta Leader issues removeEvictedPeers() to remove dead node"]
-    end
-
-    T1 --> Process["Stream Peer Removal Process"]
-    T2 --> Process
-    T3 --> Process
-```
-
 ### 1.1 Trigger Comparison & Required Operator Actions
 
 | Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
@@ -34,36 +21,28 @@ flowchart TD
 ## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
 ```mermaid
-flowchart TD
-    Trigger["Trigger Event\n(Scale-Down / Peer Evict / Meta Auto-Heal)"] --> Step1
+sequenceDiagram
+    autonumber
+    actor Op as Operator / Client
+    participant Meta as Meta Leader ($JS.META)
+    participant Leader as Stream Leader
+    participant Target as Target Evicted Peer
+    participant Quorum as Remaining Raft Quorum
 
-    subgraph Step1["1. Meta Leader Desired State Update"]
-        S1["- Meta Leader updates streamAssignment in $JS.META\n- Marks target peer for removal in Group.Desired.ScaleDown"]
+    Op->>Meta: 1. Trigger Peer Removal / Scale-Down API
+    Note over Meta: Updates streamAssignment (Desired.ScaleDown = true)
+    Meta->>Meta: Propose assignment update to $JS.META WAL
+    Meta->>Leader: Broadcast committed assignment
+    opt Target Peer is Current Leader
+        Leader->>Leader: 2. Execute StepDown(preferred) to follower first
     end
-
-    Step1 -- "Committed to $JS.META Raft Log" --> Step2
-
-    subgraph Step2["2. Stream Leader Handover Check"]
-        S2["- If target peer TO BE REMOVED IS CURRENT LEADER:\n  Leader executes graceful StepDown(preferred) to follower first\n- If target peer IS A FOLLOWER:\n  Proceeds directly to peer removal"]
-    end
-
-    Step2 -- "Stable non-evicted Leader active" --> Step3
-
-    subgraph Step3["3. Raft Membership Change Proposal"]
-        S3["- Stream Leader proposes EntryRemovePeer(targetNodeID)\n- Appends entry to Leader WAL and replicates to quorum"]
-    end
-
-    Step3 -- "Quorum Commit Reached" --> Step4
-
-    subgraph Step4["4. Quorum Shrinking & Peer Set Update"]
-        S4["- Remaining nodes delete target node from n.peers map\n- Leader calls n.recalcQuorum() to shrink quorum (e.g., Q=2 to Q=1)"]
-    end
-
-    Step4 --> Step5
-
-    subgraph Step5["5. Target Node Shutdown & Storage Cleanup"]
-        S5["- Removed node stops its raftNode instance (n.Stop())\n- Deletes local FileStore storage directory from disk"]
-    end
+    Leader->>Leader: 3. Call ProposeRemovePeer(targetNodeID)
+    Leader->>Quorum: Replicate EntryRemovePeer log entry
+    Quorum-->>Leader: Majority Quorum Commit Reached
+    Leader->>Leader: 4. Remove target from n.peers & shrink quorum (recalcQuorum)
+    Quorum->>Quorum: Recalculate Quorum size (e.g. Q=2 to Q=1)
+    Leader->>Target: 5. Signal Peer Removal Notification
+    Note over Target: Stops raftNode (n.Stop()) & purges FileStore from disk
 ```
 
 ### 2.1 Working Principles

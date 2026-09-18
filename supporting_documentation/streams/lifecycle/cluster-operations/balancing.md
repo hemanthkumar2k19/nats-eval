@@ -8,19 +8,6 @@ Stream balancing and peer migration in NATS JetStream allows operators or cluste
 
 Stream balancing or migration can be initiated through three distinct pathways:
 
-```mermaid
-flowchart TD
-    subgraph Triggers["Trigger Pathways"]
-        T1["1. Manual Client / Admin Migration API\nCLI: nats stream cluster peer migrate ORDERS --peers=nats-2,nats-3,nats-4\nCLI: nats stream cluster peer balance"]
-        T2["2. Placement Tag Update\nTrigger: Operator updates Placement.Tags in stream config\nExample: Changing tag requirement from rack:A to rack:B"]
-        T3["3. Automated Meta-Leader Rebalancing\nTrigger: Meta Leader ($JS.META) detects peer set drift or node evacuation\nAction: cc.reconcile() automatically triggers background stream migration"]
-    end
-
-    T1 --> Process["Stream Peer Migration Process"]
-    T2 --> Process
-    T3 --> Process
-```
-
 ### 1.1 Trigger Comparison & Required Operator Actions
 
 | Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
@@ -34,36 +21,30 @@ flowchart TD
 ## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
 ```mermaid
-flowchart TD
-    Trigger["Trigger Event\n(Migrate CLI / Placement Update / Auto Rebalance)"] --> Step1
+sequenceDiagram
+    autonumber
+    actor Op as Operator / Client
+    participant Meta as Meta Leader ($JS.META)
+    participant Leader as Active Stream Leader
+    participant Target as Target Candidate Peer(s)
+    participant OldNode as Evicted Old Peer(s)
 
-    subgraph Step1["1. Desired State Definition ($JS.META)"]
-        S1["- Meta Leader calculates target peer set (Desired)\n- Sets Group.Desired.Move = true\n- Commits updated streamAssignment to $JS.META log"]
+    Op->>Meta: 1. Trigger Stream Migration / Rebalance
+    Note over Meta: Calculates target peer set (Desired.Move = true)
+    Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
+    Meta->>Leader: Broadcast committed assignment update
+    Leader->>Leader: 2. Install Raft Snapshot & call extendPeerSet()
+    Leader->>Target: ProposeAddPeer(targetNodeID)
+    Note over Target: Initializes local FileStore & joins stream Raft bus
+    Leader->>Target: 3. Stream compressed S2 Snapshot & WAL catch-up
+    Note over Target: Populates FileStore in background (excluded from quorum)
+    Target-->>Leader: Catchup complete (catchups == 0)
+    opt Active Leader is being Evicted
+        Leader->>Leader: 4. Execute StepDown(preferred)
+        Leader->>Target: Transfer leadership to caught-up target
     end
-
-    Step1 -- "Broadcast via $JS.META log" --> Step2
-
-    subgraph Step2["2. Leader Snapshot & Peer Extension"]
-        S2["- Stream Leader flushes pending state & creates Raft Snapshot\n- Calls extendPeerSet() to add target node to Raft group\n- Target node initializes local FileStore & joins bus"]
-    end
-
-    Step2 --> Step3
-
-    subgraph Step3["3. Background Catch-up Phase"]
-        S3["- Target node starts empty (pindex = 0)\n- Leader streams compressed Snapshot / WAL entries to target node\n- Target node populates local FileStore in background\n- Target node EXCLUDED from quorum voting & old peer set remains active"]
-    end
-
-    Step3 -- "Target node fully caught up (catchups == 0)" --> Step4
-
-    subgraph Step4["4. Leadership Handover (If Leader is Migrating)"]
-        S4["- Stream Leader checks if it is being evacuated\n- If yes, executes StepDown(preferred) to a target peer\n- Preferred target node becomes new Stream Leader fast"]
-    end
-
-    Step4 --> Step5
-
-    subgraph Step5["5. Old Peer Eviction & Cleanup"]
-        S5["- Active Leader calls ProposeRemovePeer(oldNodeID)\n- Old node removed from Raft peers & quorum recalculated\n- Old node shuts down raftNode & deletes local storage from disk"]
-    end
+    Leader->>OldNode: 5. ProposeRemovePeer(oldNodeID)
+    Note over OldNode: Stops raftNode & purges local FileStore from disk
 ```
 
 ### 2.1 Working Principles

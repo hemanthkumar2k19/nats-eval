@@ -8,21 +8,6 @@ Adding new nodes or scaling up stream replicas in NATS JetStream allows clusters
 
 Stream replica scale-up or peer addition can be initiated through three distinct pathways:
 
-```mermaid
-flowchart TD
-    subgraph Triggers["Trigger Pathways"]
-        T1["1. Manual Client API / Config Scale-Up\nTrigger: Client or operator updates stream config (num_replicas: 3)\nCLI: nats stream update ORDERS --replicas=3"]
-        T2["2. Manual Administrative Peer Addition\nTrigger: Operator manually targets a specific cluster node\nCLI: nats stream cluster peer add ORDERS nats-3"]
-        T3["3. Automated Meta-Leader Self-Healing\nTrigger: Meta Leader ($JS.META) detects node crash\nAction: Meta Leader allocates replacement peer on healthy node"]
-    end
-
-    T1 --> Process["Stream Peer Addition Process"]
-    T2 --> Process
-    T3 --> Process
-```
-
-### 1.1 Trigger Comparison & Required Operator Actions
-
 | Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
 | :--- | :--- | :--- | :--- |
 | **Manual Scale-Up** | Client / Operator | Run `nats stream update <stream> --replicas=N` or issue API update | Increases stream replication factor and selects optimal candidate nodes across cluster |
@@ -34,36 +19,27 @@ flowchart TD
 ## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
 ```mermaid
-flowchart TD
-    Trigger["Trigger Event\n(Client API / Admin CLI / Auto-Heal)"] --> Step1
+sequenceDiagram
+    autonumber
+    actor Op as Operator / Client
+    participant Meta as Meta Leader ($JS.META)
+    participant Target as Target Node
+    participant Leader as Stream Leader
+    participant Quorum as Stream Raft Quorum
 
-    subgraph Step1["1. Meta Leader Assignment"]
-        S1["- Meta Leader checks account quotas and node liveness\n- Selects target node via selectPeerGroup() scoring\n- Proposes updated streamAssignment to $JS.META WAL"]
-    end
-
-    Step1 -- "Committed to $JS.META Raft Log" --> Step2
-
-    subgraph Step2["2. Target Node Initialization"]
-        S2["- Target node receives assignment from $JS.META\n- Creates local FileStore storage directory on disk\n- Spawns raftNode in Follower State (pindex = 0)\n- Subscribes to stream Raft bus ($SYS.RAFT.group_id.*)"]
-    end
-
-    Step2 --> Step3
-
-    subgraph Step3["3. Stream Leader Peer Proposal"]
-        S3["- Stream Leader detects target node on Raft bus\n- Calls node.ProposeAddPeer(newNodeID)\n- Appends EntryAddPeer to Stream Raft WAL"]
-    end
-
-    Step3 --> Step4
-
-    subgraph Step4["4. Background Stream Snapshot Sync & Catch-up"]
-        S4["- Target node starts with empty storage (pindex = 0)\n- Leader streams Snapshot / Catch-up entries over network\n- Target node populates local FileStore in background\n- Target node EXCLUDED from quorum votes while catching up"]
-    end
-
-    Step4 -- "pindex catches up to Leader commit" --> Step5
-
-    subgraph Step5["5. Quorum Expansion & Finalization"]
-        S5["- Leader verifies target node is fully caught up\n- Calls node.recalcQuorum() to expand Quorum (e.g., Q=1 to Q=2)\n- Target node becomes full voting member of stream group"]
-    end
+    Op->>Meta: 1. Trigger Scale-Up / Peer Addition API
+    Note over Meta: Checks quotas, ranks nodes via selectPeerGroup()
+    Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
+    Meta->>Target: 2. Broadcast committed assignment
+    Note over Target: Creates local FileStore & spawns raftNode (Follower)
+    Target->>Leader: Join stream Raft bus ($SYS.RAFT)
+    Leader->>Leader: 3. Detect target peer & call ProposeAddPeer()
+    Leader->>Quorum: Replicate EntryAddPeer entry
+    Leader->>Target: 4. Stream compressed S2 Snapshot & WAL catch-up
+    Note over Target: Populates FileStore in background (excluded from quorum)
+    Target-->>Leader: Catchup complete (appliedIndex == commitIndex)
+    Leader->>Leader: 5. Recalculate Quorum (recalcQuorum)
+    Leader->>Quorum: Promote Target to full voting member (Q expanded)
 ```
 
 ### 2.1 Working Principles

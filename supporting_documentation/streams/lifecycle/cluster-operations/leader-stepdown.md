@@ -8,19 +8,6 @@ A client or operator requests leadership transfer for a specific stream by publi
 
 Stream leadership stepdown can be initiated through three distinct pathways:
 
-```mermaid
-flowchart TD
-    subgraph Triggers["Trigger Pathways"]
-        T1["1. Manual Client API / Admin CLI Request\nTrigger: Client or operator issues stepdown command\nCLI: nats stream cluster step-down ORDERS [--peer nats-2]"]
-        T2["2. Automated Storage or Quorum Failure\nTrigger: Server engine detects disk write error or Raft quorum loss\nAction: Server automatically demotes leader to follower state"]
-        T3["3. Automated Stream Evacuation / Server Shutdown\nTrigger: Operator initiates node drain/evacuation or server shutdown\nAction: NATS executes StepDown before node stops"]
-    end
-
-    T1 --> Process["Leader Step-Down Process"]
-    T2 --> Process
-    T3 --> Process
-```
-
 ### 1.1 Trigger Comparison & Required Operator Actions
 
 | Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
@@ -34,36 +21,24 @@ flowchart TD
 ## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
 ```mermaid
-flowchart TD
-    Trigger["Trigger Event\n(API Request / Storage Error / Server Shutdown)"] --> Step1
+sequenceDiagram
+    autonumber
+    actor Op as Operator / Client
+    participant Leader as Active Stream Leader
+    participant Target as Target / Preferred Follower
+    participant Quorum as Stream Raft Quorum
 
-    subgraph Step1["1. Pre-Condition Guard Checks"]
-        S1["- Verify JetStream enabled, clustered, & Meta Leader online\n- Verify stream registry assignment and quorum liveness\n- Reject invalid API requests (JSClusterRequiredError)"]
-    end
-
-    Step1 -- "Guards Passed" --> Step2
-
-    subgraph Step2["2. Stream Leader Gate & Target Resolution"]
-        S2["- Verify THIS node is active leader (mset.isLeader)\n- Non-leader followers exit silently\n- Resolve preferred target peer if specified in payload"]
-    end
-
-    Step2 --> Step3
-
-    subgraph Step3["3. Raft Leadership Transfer Proposal"]
-        S3["- Invoke raft.StepDown(preferred)\n- Select target peer (preferred or best follower)\n- Broadcast EntryLeaderTransfer log entry to target"]
-    end
-
-    Step3 --> Step4
-
-    subgraph Step4["4. Local Leader Demotion"]
-        S4["- Demote local node to Follower state (stepdown(noLeader))\n- Reset election timers and stop heartbeat broadcasts"]
-    end
-
-    Step4 --> Step5
-
-    subgraph Step5["5. Fast-Track Target Campaign & Victory"]
-        S5["- Target peer receives EntryLeaderTransfer entry\n- Triggers CampaignImmediately() (10ms timer)\n- Target wins election and assumes Stream Leader role"]
-    end
+    Op->>Leader: 1. Step-Down Request ($JS.API.STREAM.LEADER.STEPDOWN.<stream>)
+    Note over Leader: Pre-Condition Guards & Stream Leader Gate Check
+    Leader->>Leader: 2. Verify mset.isLeader() & parse TargetPeer
+    Leader->>Leader: 3. Call raft.StepDown(preferred)
+    Leader->>Quorum: Broadcast EntryLeaderTransfer log entry
+    Leader->>Leader: 4. Demote to Follower (stepdown(noLeader))
+    Note over Leader: Resets election timers & stops heartbeat broadcasts
+    Quorum->>Target: Deliver EntryLeaderTransfer entry
+    Target->>Target: 5. Call CampaignImmediately() (10ms timer)
+    Target->>Quorum: Fast-track vote request & win election
+    Note over Target: Assumes Stream Leader role
 ```
 
 ### 2.1 Working Principles
