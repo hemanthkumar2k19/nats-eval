@@ -1,5 +1,28 @@
 # Changelog
 
+## [2026-09-18] - Stream Cluster Operations Reference Documentation Standardization
+
+### Added
+- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/balancing.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/balancing.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix).
+- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/remove-node.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/remove-node.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix).
+- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/leader-stepdown.md) into the standardized 4-part structure (Triggers & Operator Actions with Mermaid diagram, Layer 1 Conceptual Flow & Working Principles with 5-step Mermaid flowchart, Layer 2 Go Mechanics, Operational & Performance Impact matrix comparing Graceful vs Unplanned stepdown).
+- Replaced all text-based flow diagrams across cluster operations documentation (`add-node.md`, `remove-node.md`, `leader-stepdown.md`, `balancing.md`) with clean, interactive `mermaid` flowchart blocks.
+- **Reason**: Standardizes layout and improves diagram editability and rendering quality across all stream cluster operations documentation.
+- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/`).
+
+## [2026-09-18] - Stream Replica Scale-Up & Peer Addition Reference Documentation
+
+### Added
+- Restructured [`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/add-node.md) into 4 distinct sections:
+  - **Section 1 (Triggers & Operator Actions)**: Manual Client API scale-up, CLI peer addition, `$JS.META` self-healing, operator action matrix, and interactive Mermaid flowchart.
+  - **Section 2 (Layer 1: Conceptual Flow & Working Principles)**: 5-step interactive Mermaid flowchart, non-blocking catchup, S2 snapshot streaming, and dynamic quorum expansion ($Q = \lfloor R/2 \rfloor + 1$).
+  - **Section 3 (Layer 2: Go Runtime Implementation Mechanics)**: Deep dive mapping to `nats-server` Go files and functions (`s.jsClusteredStreamUpdateRequestLocked()`, `n.ProposeAddPeer()`, `InstallSnapshot()`, `n.recalcQuorum()`).
+  - **Section 4 (Operational & Performance Impact)**: Comprehensive impact analysis matrix (Client Publish Latency, Network Bandwidth, Leader CPU, Leader Disk I/O, Quorum Availability, Memory Headroom).
+- Updated text-based ASCII flow diagrams in `add-node.md` to standard Mermaid `flowchart TD` blocks to improve visualization, editing, and rendering.
+- Updated [`supporting_documentation/streams/lifecycle/cluster-operations/overview.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/supporting_documentation/streams/lifecycle/cluster-operations/overview.md) summary matrix with peer addition and scale-up controls.
+- **Reason**: Enhances diagram editability and rendering quality by converting ASCII text boxes to Mermaid flowcharts in `add-node.md`.
+- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/add-node.md`).
+
 ## [2026-09-18] - End-to-End Write Path Architecture Documentation Refactoring
 
 ### Changed

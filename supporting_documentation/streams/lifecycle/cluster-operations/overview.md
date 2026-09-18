@@ -146,6 +146,7 @@ Guarantees that if a node crashes or disk fails, the cluster automatically repai
 | **Disk Sync Policy** | `opts.SyncAlways` (`filestore.go`) | Storage Durability | Single-node power-loss protection; auto-relaxed in $R > 1$ clusters |
 | **Emergency Quorum** | `RescueQuorum(qn)` (`raft.go`) | Consensus Recovery | Lower quorum size to recover deadlocked cluster after catastrophic peer loss |
 | **Peer Eviction** | `EvictPeers()` (`raft.go`) | Membership Management | Remove dead nodes and dynamically shrink cluster quorum |
+| **Peer Scale-Up / Add Node** | `ProposeAddPeer()` (`raft.go`) | Replica Expansion | Scale up stream replicas or allocate replacement nodes with non-blocking catchup |
 | **Apply Suspension** | `PauseApply()` / `ResumeApply()` (`raft.go`) | State Protection | Prevent state corruption during large follower catch-up syncs |
 | **Read-Only Shadowing** | `SetObserver(true)` (`raft.go`) | Read Scaling | Replicate data for local reads without impacting Raft quorum voting |
 | **Auto Self-Healing** | `meta.reconcile` loop (`jetstream_cluster.go`) | Autonomous Repair | Reallocate stream replicas automatically when a node dies |

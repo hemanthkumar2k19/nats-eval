@@ -1,163 +1,141 @@
-# Stream Leader Step-Down
+# Stream Leader Step-Down Operations
 
-A client or operator requests leadership transfer for a specific stream by publishing an API request to `$JS.API.STREAM.LEADER.STEPDOWN.<stream_name>`. The current Stream Leader validates the request, resolves the target peer, and delegates to the Raft consensus layer to execute a fast-track leadership transfer. This document details operational impact, automatic vs. manual triggers, API guard checks, and internal Raft transfer mechanics.
-
----
-
-## 1. Overview & Primary Use Cases
-
-Stream leadership stepdown allows operators to migrate stream leadership gracefully without triggering unplanned election timeouts:
-
-- **Rolling Server Maintenance**: Moving leadership off a node before restarting it for OS/kernel updates, eliminating client error windows.
-- **Cluster Load Balancing**: Rebalancing CPU and disk I/O load across cluster nodes when a single node becomes a hotspot.
-- **Hardware Degradation**: Moving leadership away from a server experiencing disk latency degradation or network instability before failure occurs.
+A client or operator requests leadership transfer for a specific stream by publishing an API request to `$JS.API.STREAM.LEADER.STEPDOWN.<stream_name>`. The current Stream Leader validates the request, resolves the target peer, and delegates to the Raft consensus layer to execute a fast-track leadership transfer. This document details trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during leader stepdown.
 
 ---
 
-## 2. Operational Impact Comparison
+## 1. Triggers & Operator Actions
 
-When a Stream Leader steps down, the operational impact depends on whether the transfer is graceful (voluntary) or unplanned (crash or partition):
+Stream leadership stepdown can be initiated through manual client/CLI API commands or automated server engine conditions:
 
-| Operational Dimension | Graceful Transfer (~10ms - 50ms) | Unplanned Failure (1.5s - 3.0s) |
-| :--- | :--- | :--- |
-| **Client Publishes** | Briefly buffered; succeed on immediate SDK retry without returning errors | Return `503 No Stream Leader Available` or time out until a new leader is elected; SDKs retry automatically |
-| **Message Storage (WAL)** | Stepping-down leader flushes uncommitted messages to disk before converting to follower | Uncommitted messages flushed if process stops gracefully; lost if node crashes abruptly |
-| **Consumer Delivery** | Momentary pause while new leader initializes active consumers | Brief delivery pause until election completes |
-| **Duplicate Delivery Risk** | Messages sent by old leader but unacknowledged are re-delivered by new leader | Same re-delivery risk |
-| **Mirrors & Sources** | Internal fetch loop pauses briefly and auto-reconnects to new leader | Auto-reconnects after election window |
+```mermaid
+flowchart TD
+    subgraph Triggers["Trigger Pathways"]
+        T1["1. Manual Client API / Admin CLI Request\nCLI: nats stream cluster step-down ORDERS [--peer nats-2]\nSubject: $JS.API.STREAM.LEADER.STEPDOWN.<stream>"]
+        T2["2. Automated Server Storage / Quorum Failure\nTriggers: Storage Write Error (handleStorageError) or Raft Quorum Loss (lostQuorumLocked)"]
+        T3["3. Automated Stream Evacuation / Server Shutdown\nTriggers: Stream Move/Evacuation (peerEvacuate) or Node Shutdown (s.shutdown())"]
+    end
 
----
-
-## 3. Automatic Step-Down Triggers
-
-NATS automatically invokes `mset.node.StepDown()` on a Stream Leader under these operational conditions:
-
-| Trigger Scenario | Internal Handler | Operational Action & Result |
-| :--- | :--- | :--- |
-| **Disk Write Error** | `handleStorageError` | Leader fails to write to disk (disk full, filesystem corruption, or I/O failure); steps down so a healthy replica with a working disk takes over |
-| **Raft Quorum Loss** | `lostQuorumLocked` | Leader loses contact with a majority of stream peers (e.g., 2 of 3 unreachable); demotes to follower to prevent split-brain writes |
-| **Stream Migration / Evacuation** | `peerStreamMove` / `peerEvacuate` | Operator initiates stream migration; NATS issues graceful `StepDown` to hand off leadership to the target replica |
-| **Server Shutdown** | `s.shutdown()` | Server hosting the leader shuts down; `StepDown` is executed on all stream Raft nodes on that server |
-| **Higher Term Received** | Raft Protocol | Leader receives a message with a higher consensus term; automatically demotes to follower |
-
----
-
-## 4. Stepdown Request Flow & Guard Checks
-
-When a client or operator issues a stepdown request (`$JS.API.STREAM.LEADER.STEPDOWN.<stream_name>`), `jsStreamLeaderStepDownRequest` processes the request through five stages:
-
-```text
-[ API Request: $JS.API.STREAM.LEADER.STEPDOWN.<stream_name> ]
-                            |
-                            v
-+-----------------------------------------------------------+
-| 1. Pre-Condition Guard Checks                             |
-|    - Verify client != nil && JetStreamEnabled             |
-|    - Resolve target account from subject token            |
-|    - Verify JetStream is clustered                        |
-|    - Verify Meta Raft Leader is online                    |
-|    - Verify stream assignment exists                      |
-|    - Verify API level compatibility                       |
-|    - Verify Stream Raft Group has quorum                  |
-+----------------------------+------------------------------+
-                            |
-                            v
-+-----------------------------------------------------------+
-| 2. Stream Leader Gate                                     |
-|    - Is THIS node the active Stream Leader (mset.isLeader)?|
-|    - If NO -> Exit silently (only active leader proceeds) |
-|    - If YES -> Resolve local Stream Instance              |
-+----------------------------+------------------------------+
-                            |
-                            v
-+-----------------------------------------------------------+
-| 3. Stream Resolution                                      |
-|    - Resolve local stream instance from account           |
-|    - If inactive/nil -> Return Success = true             |
-+----------------------------+------------------------------+
-                            |
-                            v
-+-----------------------------------------------------------+
-| 4. Preferred Target Resolution                            |
-|    - Parse preferred target node if specified in payload  |
-+----------------------------+------------------------------+
-                            |
-                            v
-+-----------------------------------------------------------+
-| 5. Raft StepDown Execution                                |
-|    - Invoke raft.StepDown(preferred) on Stream Raft Node  |
-+-----------------------------------------------------------+
+    T1 --> Process["Leader Step-Down Process"]
+    T2 --> Process
+    T3 --> Process
 ```
 
-### 4.1 Pre-Condition Guards
+### 1.1 Trigger Comparison & Required Operator Actions
 
-The handler executes 7 guard checks upon receiving a stepdown request:
-
-| Guard Check | Condition | Error Response |
-| :--- | :--- | :--- |
-| **JetStream Enabled** | Client is nil or JetStream is disabled on this server | Request silently dropped |
-| **Clustering Required** | Server is not part of a JetStream cluster | `JSClusterRequiredError` |
-| **Meta Leader Available** | Meta Raft Group (`$JS.META`) is leaderless | `JSClusterNotAvailError` |
-| **Stream Registry Check** | Stream assignment is missing from cluster registry | `JSStreamNotFoundError` (Meta Leader returns error; followers exit silently) |
-| **API Level Check** | Client API level is incompatible | `JSRequiredApiLevelError` |
-| **Account JetStream Check** | JetStream is disabled for the account | `JSNotEnabledForAccountError` |
-| **Stream Quorum Check** | Stream Raft Group has lost quorum | `JSClusterNotAvailError` |
-
-### 4.2 Stream Leader Gate
-
-Only the active Stream Raft Leader proceeds past this point. If a receiving follower node gets the request, it exits silently. Official NATS client SDKs automatically retry through the route mesh until the request reaches the active Stream Leader.
+| Trigger Pathway | Initiator | Required Operator Action | Operational Outcome |
+| :--- | :--- | :--- | :--- |
+| **Manual Step-Down** | Operator / CLI | Run `nats stream cluster step-down <stream> [--peer target]` | Initiates fast-track leadership transfer to target or optimal follower |
+| **Storage / Quorum Failure** | Server Engine | **Zero operator action required** | Automatically demotes faulty leader on disk error or quorum loss to protect stream consistency |
+| **Stream Move / Evacuation** | Operator / System | Run stream evacuation command or trigger node shutdown | Automatically executes `StepDown` before node shutdown to prevent election delays |
 
 ---
 
-## 5. Raft Leadership Transfer Internal Process
+## 2. Layer 1: High-Level Conceptual Flow & Working Principles
 
-Once `raft.StepDown(preferred)` is invoked, the Raft layer executes the transfer internally:
+```mermaid
+flowchart TD
+    Trigger["Step-Down Trigger Event\n(API Request / Storage Error / Server Shutdown)"] --> Step1
 
-```text
-[ raft.StepDown(preferred) ]
-             |
-             v
-1. Verify Current Node is Leader (n.State() == Leader)
-             |
-             v
-2. Select Target Peer (Preferred Peer if Healthy, else First Available Follower)
-             |
-             v
-3. Broadcast EntryLeaderTransfer Log Entry via sendAppendEntry()
-             |
-             v
-4. Demote Local Node to Follower (stepdown(noLeader)) & Reset Election Timers
-             |
-             v
-5. Target Peer Receives Entry -> Triggers CampaignImmediately() (10ms Timer) -> Wins Leadership
+    subgraph Step1["1. Pre-Condition Guard Checks"]
+        S1["- Verify JetStream enabled, clustered, & Meta Leader online\n- Verify stream registry assignment and quorum liveness\n- Reject invalid API requests (JSClusterRequiredError)"]
+    end
+
+    Step1 -- "Guards Passed" --> Step2
+
+    subgraph Step2["2. Stream Leader Gate & Target Resolution"]
+        S2["- Verify THIS node is active leader (mset.isLeader)\n- Non-leader followers exit silently\n- Resolve preferred target peer if specified in payload"]
+    end
+
+    Step2 --> Step3
+
+    subgraph Step3["3. Raft Leadership Transfer Proposal"]
+        S3["- Invoke raft.StepDown(preferred)\n- Select target peer (preferred or best follower)\n- Broadcast EntryLeaderTransfer log entry to target"]
+    end
+
+    Step3 --> Step4
+
+    subgraph Step4["4. Local Leader Demotion"]
+        S4["- Demote local node to Follower state (stepdown(noLeader))\n- Reset election timers and stop heartbeat broadcasts"]
+    end
+
+    Step4 --> Step5
+
+    subgraph Step5["5. Fast-Track Target Campaign & Victory"]
+        S5["- Target peer receives EntryLeaderTransfer entry\n- Triggers CampaignImmediately() (10ms timer)\n- Target wins election and assumes Stream Leader role"]
+    end
 ```
 
-### 5.1 Step-by-Step Internal Protocol
+### 2.1 Working Principles
 
-1. **Leader Verification**: Under lock, the Raft node verifies it is still the Leader (`n.State() == Leader`).
-2. **Target Peer Selection**:
-   - **Preferred Peer Specified**: Verifies the peer is online and healthy (not marked `offline`, last heartbeat ACK received within 3 seconds). If unhealthy, falls back to automatic selection.
-   - **Automatic Selection**: Picks the first available healthy follower from the peer list.
-3. **Leadership Transfer Entry**: The leader broadcasts a special `EntryLeaderTransfer` log entry containing the target peer ID directly via `sendAppendEntry()`.
-4. **Local Demotion**: The leader invokes `stepdown(noLeader)`, demoting local state to Follower, resetting election timers, and stopping heartbeat broadcasts.
-5. **Target Peer Fast-Track Campaign**: The target peer receives `EntryLeaderTransfer` and immediately calls `CampaignImmediately()` (10ms timer), skipping standard election waits and fast-tracking its election victory to become the new Stream Raft Leader.
+- **Graceful Fast-Track Transfer**: Unlike unplanned node crashes that rely on full election timeouts (1.5s - 3.0s), stepdown uses `EntryLeaderTransfer` and `CampaignImmediately()` (10ms timer) to complete leadership transfer in ~10ms - 50ms.
+- **Leader Gate & Follower Silence**: Stepdown requests sent to follower nodes are silently dropped. Official client SDKs automatically route requests across the NATS mesh to the active leader.
+- **Preferred Peer Override**: If a specific target node is specified (`--peer nats-2`), the leader verifies that peer's health (heartbeat ACK within 3s). If healthy, leadership is transferred directly to the requested node.
+- **Automatic Fallback on Disk / Quorum Loss**: If a node suffers disk write errors or loses connection to quorum, it demotes immediately to follower state to prevent stale split-brain writes.
 
 ---
 
-## 6. Operational Workflows & CLI
+## 3. Layer 2: Go Runtime Implementation Mechanics
 
-### 6.1 Basic Step-Down
+### 3.1 Step 1: Pre-Condition Guards & Ingress
 
-To trigger a graceful leadership transfer to any healthy follower:
+- **Primary Source File**: `server/jetstream_cluster.go`
+- **Function**: `jsStreamLeaderStepDownRequest()`
+- **Goroutine Context**: API Handler Goroutine
 
-```bash
-nats stream cluster step-down EVENTS
-```
+1. Verifies JetStream is enabled and server is clustered (`JSClusterRequiredError`).
+2. Checks `$JS.META` Meta Leader availability (`JSClusterNotAvailError`).
+3. Resolves target account and verifies stream assignment exists.
+4. Checks stream Raft group quorum liveness (`JSClusterNotAvailError`).
 
-### 6.2 Targeted Step-Down
+### 3.2 Step 2: Stream Leader Gate & Target Parsing
 
-To request leadership transfer to a specific target node:
+- **Primary Source File**: `server/jetstream_cluster.go`
+- **Function**: `jsStreamLeaderStepDownRequest()`
+- **Goroutine Context**: API Handler Goroutine
 
-```bash
-nats stream cluster step-down EVENTS --peer nats-2
-```
+1. Checks `mset.isLeader()`. If false, exits silently (followers ignore request).
+2. Resolves local stream instance `mset`.
+3. Parses optional `TargetPeer` parameter from JSON payload if specified.
+
+### 3.3 Step 3: Raft Leadership Transfer (`raft.StepDown`)
+
+- **Primary Source File**: `server/raft.go`
+- **Function**: `n.StepDown(preferred)`
+- **Goroutine Context**: Stream Leader Raft Loop
+
+1. Under lock, verifies `n.State() == Leader`.
+2. Resolves target peer: uses `preferred` if online and ACKed within 3s, else selects first healthy follower.
+3. Broadcasts `EntryLeaderTransfer` log entry via `sendAppendEntry()`.
+
+### 3.4 Step 4: Local Leader Demotion
+
+- **Primary Source File**: `server/raft.go`
+- **Function**: `n.stepdown(noLeader)`
+- **Goroutine Context**: Stream Leader Raft Loop
+
+1. Changes local node state to `Follower`.
+2. Resets election timers.
+3. Stops broadcasting leader heartbeats (`sendHeartbeat()`).
+
+### 3.5 Step 5: Fast-Track Target Election (`CampaignImmediately`)
+
+- **Primary Source File**: `server/raft.go`
+- **Function**: `n.processLeaderTransfer()` -> `n.CampaignImmediately()`
+- **Goroutine Context**: Target Peer Raft Loop
+
+1. Target peer receives `EntryLeaderTransfer` entry matching its peer ID.
+2. Invokes `n.CampaignImmediately()` setting a 10ms fast election timer.
+3. Fast-tracks election, sends Vote Requests (`EntryRequestVote`), collects quorum ACKs, and becomes the new Stream Leader.
+
+---
+
+## 4. Operational & Performance Impact During Operation
+
+| Operational Dimension | Graceful StepDown (~10ms - 50ms) | Unplanned Failure (1.5s - 3.0s) | Detailed Behavioral Characteristics |
+| :--- | :--- | :--- | :--- |
+| **Client Publishes** | Briefly buffered (~10ms) | Error / Timeout (1.5s - 3s) | During graceful stepdown, client publishes buffer briefly in SDK memory and succeed immediately without client-facing errors |
+| **Message Storage (WAL)** | Flushed to disk before transfer | Flushed if clean stop; uncommitted lost if crash | Stepping-down leader flushes pending WAL entries before demoting to follower |
+| **Consumer Delivery** | Momentary pause (~10ms) | Delivery pause until election | Consumer delivery pauses briefly during handover and resumes immediately under new leader |
+| **Duplicate Delivery Risk** | Low / Minimal | Low / Moderate | Any unacknowledged inflight messages are re-delivered by new leader; consumer deduplication handles repeats |
+| **Mirrors & Sources** | Auto-reconnect (~10ms) | Auto-reconnect after election | Internal fetch loops pause momentarily and reconnect to new leader subject endpoint |

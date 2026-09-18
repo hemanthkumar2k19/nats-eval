@@ -18,25 +18,25 @@
         - When and how leader step-down occurs
         - Operational impact during step-down
         - Manual vs automatic triggers
-    - Balancing <!-- TODO -->
-        - Automatic vs manual balancing behaviours <!-- TODO -->
-        - When to invoke balance operations <!-- TODO -->
-        - Operational impact of rebalancing <!-- TODO -->
-    - Peer Removal <!-- TODO -->
-        - Process for removing a peer from a stream <!-- TODO -->
-        - Manual vs automatic and required operator actions <!-- TODO -->
-    - Node Failure and Restart <!-- TODO -->
-        - Behaviour during node failure <!-- TODO -->
-        - Restart and recovery process <!-- TODO -->
-        - Manual vs automatic recovery <!-- TODO -->
-    - Replica Loss <!-- TODO -->
-        - Detection of replica loss <!-- TODO -->
-        - Recovery and re-replication <!-- TODO -->
-        - Manual vs automatic and required operator actions <!-- TODO -->
-    - Adding New Nodes <!-- TODO -->
-        - Process for adding new nodes to a stream <!-- TODO -->
-        - Data sync and catchup behaviour <!-- TODO -->
-        - Manual vs automatic and required operator actions <!-- TODO -->
+    - Balancing 
+        - Automatic vs manual balancing behaviours
+        - When to invoke balance operations 
+        - Operational impact of rebalancing
+    - Peer Removal
+        - Process for removing a peer from a stream
+        - Manual vs automatic and required operator actions
+    - Node Failure and Restart 
+        - Behaviour during node failure
+        - Restart and recovery process
+        - Manual vs automatic recovery
+    - Replica Loss
+        - Detection of replica loss
+        - Recovery and re-replication
+        - Manual vs automatic and required operator actions
+    - Adding New Nodes
+        - Process for adding new nodes to a stream
+        - Data sync and catchup behaviour
+        - Manual vs automatic and required operator actions
     - Seal and Unseal
         - Seal usage and operational meaning
         - Seal and unseal commands
@@ -51,11 +51,11 @@
     - Performance Considerations
     - Retention Options
     - Backup to Object Store
-    - Memory Storage Recovery <!-- TODO -->
-        - Behaviour after node restart for memory-backed replicas <!-- TODO -->
-        - Sync timing and performance impact <!-- TODO -->
-        - Traffic behaviour during recovery <!-- TODO -->
-        - CLI rebalancing or replacement options <!-- TODO -->
+    - Memory Storage Recovery
+        - Behaviour after node restart for memory-backed replicas
+        - Sync timing and performance impact
+        - Traffic behaviour during recovery 
+        - CLI rebalancing or replacement options
     - Persistent Storage Layout
         - Directory structure on mounted volumes
         - Metadata file locations
@@ -73,10 +73,10 @@
     - Reactive Approach on new subject, stream and infra
 
 4. Consensus
-    - Replication Consistency and Acknowledgements <!-- TODO -->
-        - Default ack mode (leader-only vs quorum) <!-- TODO -->
-        - Available consistency configurations <!-- TODO -->
-        - Impact on latency, reliability, and durability <!-- TODO -->
+    - Replication Consistency and Acknowledgements
+        - Default ack mode (leader-only vs quorum)
+        - Available consistency configurations
+        - Impact on latency, reliability, and durability
 
 5. Deployment and Operational Automation <!-- TODO -->
     - Kubernetes deployment <!-- TODO -->
