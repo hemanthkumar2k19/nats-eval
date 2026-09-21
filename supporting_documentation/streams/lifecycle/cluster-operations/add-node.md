@@ -1,6 +1,6 @@
 # Adding New Nodes & Stream Replica Scaling
 
-Adding new nodes or scaling up stream replicas in NATS JetStream allows clusters to expand fault tolerance ($R > 1$) and automatically recover from node failures. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during node addition.
+Adding new nodes or scaling up stream replicas in NATS JetStream allows clusters to expand fault tolerance ($R > 1$) and automatically recover from node failures. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during node addition across both **`FileStore` (Disk)** and **`MemStore` (Memory)** storage modes.
 
 ---
 
@@ -31,12 +31,25 @@ sequenceDiagram
     Note over Meta: Checks quotas, ranks nodes via selectPeerGroup()
     Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
     Meta->>Target: 2. Broadcast committed assignment
-    Note over Target: Creates local FileStore & spawns raftNode (Follower)
+    
+    alt FileStore (Disk Storage Mode)
+        Note over Target: Creates disk directory & instantiates FileStore (fs)
+    else MemStore (Memory Storage Mode)
+        Note over Target: Instantiates MemStore (ms) in RAM (starts at 0 msgs)
+    end
+    
     Target->>Leader: Join stream Raft bus ($SYS.RAFT)
     Leader->>Leader: 3. Detect target peer & call ProposeAddPeer()
     Leader->>Quorum: Replicate EntryAddPeer entry
-    Leader->>Target: 4. Stream compressed S2 Snapshot & WAL catch-up
-    Note over Target: Populates FileStore in background (excluded from quorum)
+    
+    alt Catch-up via Snapshot (FileStore vs MemStore)
+        Leader->>Target: 4a. Stream S2 Compressed Snapshot & WAL Catch-up
+        Note over Leader, Target: FileStore: Leader reads 1.blk files; Target streams chunks directly to disk (1.blk)
+    else MemStore Catch-up
+        Leader->>Target: 4b. Stream S2 Compressed Snapshot & WAL Catch-up
+        Note over Leader, Target: MemStore: Leader reads RAM slice; Target allocates Go heap RAM for stream history
+    end
+
     Target-->>Leader: Catchup complete (appliedIndex == commitIndex)
     Leader->>Leader: 5. Recalculate Quorum (recalcQuorum)
     Leader->>Quorum: Promote Target to full voting member (Q expanded)
@@ -47,6 +60,9 @@ sequenceDiagram
 - **Non-Blocking Catch-up**: The catching-up node receives stream snapshot data in the background while the active Stream Leader continues processing live client publishes without interruption.
 - **Quorum Isolation (`catchupPeers`)**: Target nodes starting with empty storage (`pindex = 0`) are placed into an isolated catch-up pool and strictly excluded from quorum voting. This prevents lagging nodes from delaying client publishes or reducing write availability.
 - **S2 Snapshot Compression**: Snapshot data is compressed using S2 compression before transmission over internal system subjects (`$SYS.RAFT.<group_id>.A`).
+- **Storage-Specific Catch-up Behavior**:
+  - **`FileStore` (Disk)**: Target node streams snapshot chunks directly to disk block files (`1.blk`) via streaming buffers. Memory footprint remains low and constant; performance is bound by disk write throughput.
+  - **`MemStore` (Memory)**: Target node streams snapshot chunks into RAM memory structures. Target node experiences a rapid Go heap memory allocation spike; performance is bound by network throughput and RAM bus speed.
 - **Dynamic Quorum Expansion**: Quorum size ($Q = \lfloor R/2 \rfloor + 1$) expands only after data synchronization completes (`appliedIndex == commitIndex`), promoting the node to a full voting member.
 
 ---
@@ -72,7 +88,9 @@ sequenceDiagram
 - **Goroutine Context**: Target Server `$JS.META` Apply Loop Goroutine
 
 1. Target node receives the committed `streamAssignment` frame from `$JS.META`.
-2. Invokes `js.createStream()` -> `mset.store.Store()` to create local `FileStore` directory on disk.
+2. Invokes `js.createStream()` -> `mset.store.Store()`:
+   - **FileStore Mode**: Instantiates `fileStore` (`server/filestore.go`), creating active storage directories on disk.
+   - **MemStore Mode**: Instantiates `memStore` (`server/memstore.go`), allocating in-memory message data structures.
 3. Spawns `mset.node` (Raft node) via `s.createRaftNode()` in **Follower State**.
 4. Subscribes to internal stream Raft subjects (`$SYS.RAFT.<group_id>.A` / `$JSC.SYNC.*`).
 
@@ -95,7 +113,9 @@ sequenceDiagram
 
 1. Because the target node starts with `pindex == 0`, the Leader calculates sync bounds via `calculateSyncRequest()`.
 2. Leader streams compressed snapshot blocks over `$SYS.RAFT.<group_id>.A`.
-3. Target node calls `InstallSnapshot()`, creating block files (`1.blk`) and populating local `FileStore`.
+3. Target node calls `InstallSnapshot()`:
+   - **FileStore Mode**: Writes incoming data chunks directly to disk block files (`1.blk`) and updates sparse disk index tables.
+   - **MemStore Mode**: Appends incoming message byte arrays directly into Go slice structures in RAM.
 4. Target node is tracked in `mset.catchupPeers()` and **excluded from quorum voting**.
 
 ### 3.5 Step 5: Quorum Expansion (`recalcQuorum`)
@@ -113,11 +133,12 @@ sequenceDiagram
 
 ## 4. Operational & Performance Impact During Operation
 
-| Operational Dimension | Impact Level | Detailed Behavioral Characteristics |
+| Operational Dimension | `FileStore` (Disk Storage Mode) | `MemStore` (Memory Storage Mode) |
 | :--- | :--- | :--- |
-| **Client Publish Latency** | Zero Impact | Catching-up node is placed in `catchupPeers` and strictly excluded from quorum voting; client writes continue to be committed by existing active quorum without delay |
-| **Network Bandwidth** | Moderate to High | Leader streams compressed S2 snapshot chunks over `$SYS.RAFT.<group_id>.A` to target node; throughput is bounded by network RTT and socket buffer limits |
-| **Leader CPU Utilization** | Low to Moderate | Leader compresses snapshot blocks in background goroutines using S2 compression before wire transmission |
-| **Leader Disk I/O** | Controlled / Low | Leader reads stored block segments (`1.blk`) sequentially from disk; disk semaphores prevent catch-up reads from starving client write I/O |
-| **Quorum Availability** | Unaffected | Active quorum size ($Q$) remains unchanged until catch-up completes, preserving write availability throughout synchronization |
-| **Memory Headroom** | Minimal | Target node streams snapshot chunks directly to disk (`1.blk`) via `InstallSnapshot()`, preventing heap allocation spikes |
+| **Client Publish Latency** | **Zero Impact**; target node is placed in `catchupPeers` and excluded from quorum voting; client writes continue to be committed by active quorum without delay | **Zero Impact**; target node is placed in `catchupPeers` and excluded from quorum voting; client writes continue to be committed by active quorum without delay |
+| **Network Bandwidth** | **Moderate to High**; Leader streams compressed S2 snapshot chunks over `$SYS.RAFT.<group_id>.A` to target node | **Extremely High**; Leader streams full in-memory message history over network; bounded by network interface card (NIC) throughput |
+| **Leader Resource Impact** | **Moderate Disk & CPU**; Leader reads block files (`1.blk`) sequentially from disk and compresses chunks using S2 | **Moderate CPU & RAM**; Leader reads message slices directly from RAM and compresses chunks using S2 |
+| **Target Node Resource Impact**| **High Disk I/O**; Target node writes incoming snapshot chunks directly to disk block files (`1.blk`) | **High Memory (RAM) Spike**; Target node allocates Go heap memory rapidly to store incoming stream history |
+| **Primary System Bottleneck**| **Disk I/O Write Bandwidth & IOPS** | **Network Throughput & Memory Allocation (GC)** |
+| **Memory Headroom** | **Minimal**; Direct-to-disk streaming prevents heap allocation spikes on target node | **High Demand**; Must have sufficient unreserved RAM to hold 100% of replicated stream content |
+| **Post-Restart Recovery** | **Fast / Incremental**; Target node reads local disk block files (`1.blk`) and fetches only missing delta messages | **Slow / Full Sync**; Restart wipes RAM state; node must re-download 100% of stream history from Leader |

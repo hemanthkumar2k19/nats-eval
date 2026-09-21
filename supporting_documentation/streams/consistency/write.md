@@ -1,6 +1,6 @@
 # End-to-End Write Path Architecture
 
-The NATS JetStream write path connects client TCP publishers to distributed Raft consensus replicas and disk-backed storage engines. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance characteristics across the end-to-end write pipeline.
+The NATS JetStream write path connects client TCP publishers to distributed Raft consensus replicas and stream storage engines. While network ingress, stream event-loop batching, and Raft consensus are storage-agnostic, Phase 4 state machine persistence and operational performance characteristics adapt based on the stream's storage backend (**`FileStore` vs `MemStore`**).
 
 ---
 
@@ -28,7 +28,7 @@ sequenceDiagram
     participant StreamLoop as Stream Event Loop (internalLoop)
     participant Leader as Stream Raft Leader
     participant Followers as Follower Replicas
-    participant Storage as Storage Engine (FileStore)
+    participant Storage as Storage Engine (FileStore vs MemStore)
 
     Client->>Ingress: 1. Send PUB frame over TCP socket
     Ingress->>Ingress: Resolve subject match & package jsPubMsg
@@ -39,8 +39,15 @@ sequenceDiagram
     Leader->>Followers: Broadcast AppendEntries over $SYS.RAFT
     Followers-->>Leader: Append to WAL & reply with ACK
     Leader->>Leader: Majority Quorum Reached -> Mark COMMITTED
-    Leader->>Storage: 4. Apply committed log entry (fs.StoreRawMsg)
-    Note over Storage: Appends block file (1.blk) & updates index/dmap
+    
+    alt FileStore (Disk Storage Mode)
+        Leader->>Storage: 4a. Apply committed log entry (fs.StoreRawMsg)
+        Note over Storage: Appends binary record to block file (1.blk) & updates sparse index on disk
+    else MemStore (Memory Storage Mode)
+        Leader->>Storage: 4b. Apply committed log entry (ms.StoreRawMsg)
+        Note over Storage: Appends payload directly into Go heap memory slice in RAM (zero disk I/O)
+    end
+
     Leader->>Client: Send PubAck JSON response over TCP
     Leader->>StreamLoop: Signal active consumer workers (mset.sch)
 ```
@@ -49,9 +56,12 @@ sequenceDiagram
 
 1. **Decoupled Network Ingress & Storage Processing**: Network connection goroutines do not write directly to disk or wait synchronously for Raft consensus under lock. They buffer messages into an inbound stream queue (`ipQueue`) and return immediately to service TCP sockets.
 2. **Single-Goroutine Event Loop & Automatic Batching**: Each stream runs a single event loop (`internalLoop()`) that drains all accumulated messages from the queue in a single slice. Under heavy load, this automatically converts individual publishes into bulk batch proposals, drastically reducing lock contention and I/O operations.
-3. **Strict Post-Consensus State Mutation**: Storage writes (`FileStore` / `MemStore`) occur **only AFTER majority quorum consensus ($Q = \lfloor R/2 \rfloor + 1$) is achieved**. Uncommitted Raft log entries are never written into primary stream data files.
-4. **Leader-Only Egress & Follower Silence**: Only the active Raft Leader constructs and flushes `PubAck` responses to client publishers over TCP. Follower nodes replicate the WAL and execute state machine writes silently.
-5. **Decoupled Consumer Signals**: Stream persistence signals consumer delivery workers asynchronously (`mset.sch` / `mset.sigq`), waking pull/push consumers without delaying publisher acknowledgements.
+3. **Strict Post-Consensus State Mutation**: Storage writes (`FileStore` / `MemStore`) occur **only AFTER majority quorum consensus ($Q = \lfloor R/2 \rfloor + 1$) is achieved**. Uncommitted Raft log entries are never written into primary stream data files or memory slices.
+4. **Storage Engine Divergence in Phase 4**:
+   - **`FileStore` (Disk)**: `fs.StoreRawMsg()` appends binary records `[magic|seq|ts|hdr_len|payload]` to active disk block files (`1.blk`). Bound by disk IOPS, write throughput, and OS page cache sync settings (`SyncAlways` vs `SyncOnFlush`).
+   - **`MemStore` (Memory)**: `ms.StoreRawMsg()` appends message payloads directly to in-memory Go slices. Delivers sub-millisecond latency with zero disk I/O; bound by network throughput and RAM bus speed.
+5. **Leader-Only Egress & Follower Silence**: Only the active Raft Leader constructs and flushes `PubAck` responses to client publishers over TCP. Follower nodes replicate the WAL and execute state machine writes silently.
+6. **Decoupled Consumer Signals**: Stream persistence signals consumer delivery workers asynchronously (`mset.sch` / `mset.sigq`), waking pull/push consumers without delaying publisher acknowledgements.
 
 ---
 
@@ -93,14 +103,13 @@ This section maps the 4-phase write pipeline directly to `nats-server` Go source
 
 ### 3.4 Phase 4: Storage Engine Persistence & Egress
 
-- **Primary Source Files**: `server/filestore.go` & `server/stream.go`
+- **Primary Source Files**: `server/filestore.go`, `server/memstore.go` & `server/stream.go`
 - **Execution Context**: Raft Apply Loop Goroutine (`applyStreamEntries`) on ALL quorum nodes
 
 1. **Apply Channel Consumption**: The Raft engine notifies `applyStreamEntries()` -> `applyStreamMsgOp()` -> `processJetStreamMsg()`.
-2. **Storage Engine Write**: Calls `fs.StoreRawMsg()` (`server/filestore.go`):
-   - **Block Segment Write**: Appends binary record `[magic | sequence | timestamp | subject_len | hdr_len | payload_len | payload]` to active block file (e.g., `1.blk`).
-   - **Sparse Index Update**: Updates in-memory index mapping sequence to file offset and updates subject tree state (`psim`).
-   - **Deduplication Map**: Updates `mset.ddmap` for `Nats-Msg-Id` duplicate tracking.
+2. **Storage Engine Write**:
+   - **`FileStore` Mode**: Calls `fs.StoreRawMsg()` (`server/filestore.go`). Appends binary record `[magic|seq|ts|hdr_len|payload]` to active block file (`1.blk`), updates sparse index mapping sequence to file byte offset, and updates `mset.ddmap` for `Nats-Msg-Id` tracking.
+   - **`MemStore` Mode**: Calls `ms.StoreRawMsg()` (`server/memstore.go`). Appends message byte arrays directly into Go slice structures in RAM heap and updates `mset.ddmap`.
 3. **Outbound PubAck (Leader Only)**: Only the Raft Leader constructs `PubAck` JSON `{"stream":"ORDERS","seq":101}` and pushes it to `mset.outq` (`ipQueue`), flushing over TCP back to the client socket.
 4. **Consumer Notification Signal**: The stream pushes a signal to `mset.sch` / `mset.sigq` (`server/stream.go`), waking JetStream consumer delivery workers to deliver the message to subscribers.
 
@@ -108,10 +117,11 @@ This section maps the 4-phase write pipeline directly to `nats-server` Go source
 
 ## 4. Operational & Performance Impact During Operation
 
-| Operational Dimension | Impact Level | Detailed Behavioral Characteristics |
+| Operational Dimension | `FileStore` (Disk Storage Mode) | `MemStore` (Memory Storage Mode) |
 | :--- | :--- | :--- |
-| **Ingress Throughput** | High / Scalable | Ingress connection goroutines push into `ipQueue` without waiting on disk I/O, preventing socket backpressure |
-| **Write Batching Efficiency** | Dynamic / High | `internalLoop()` automatically drains accumulated queue slices in a single batch under high load, scaling I/O efficiency |
-| **Consensus Latency** | Majority Quorum | Client write ACK latency is bounded by the fastest majority quorum ($Q = \lfloor R/2 \rfloor + 1$) network round trip |
-| **Storage Safety** | Guaranteed | Zero uncommitted Raft entries reach primary `FileStore` files (`1.blk`); storage writes only execute after quorum commit |
-| **Egress Overhead** | Minimal (Leader Only) | Follower nodes remain silent while the active Raft Leader handles client `PubAck` responses and consumer dispatch signals |
+| **Ingress Throughput** | **High / Scalable**; Ingress connection goroutines push into `ipQueue` without waiting on disk I/O, preventing socket backpressure | **Ultra High / Scalable**; Ingress connection goroutines push into `ipQueue` without waiting, scaling linearly with CPU cores |
+| **Write Batching Efficiency** | **Dynamic / High**; `internalLoop()` automatically drains accumulated queue slices in a single batch under high load, scaling disk I/O efficiency | **Dynamic / Ultra High**; `internalLoop()` drains queue slices into RAM memory arrays in bulk, eliminating lock overhead |
+| **Storage Write Latency** | **Microsecond to Millisecond**; Bounded by disk IOPS, block file append, and OS page cache sync (`SyncAlways` vs `SyncOnFlush`) | **Sub-Millisecond**; Pure RAM allocations; zero disk I/O latency |
+| **Primary System Bottleneck**| **Disk I/O Write Bandwidth & IOPS** | **Network Throughput & Memory Allocation (GC)** |
+| **Storage Safety & Durability**| **Persistent**; Block files (`1.blk`) survive server process restarts and total power outages | **Volatile**; RAM state wiped on server restart; requires full re-replication over network from Raft Leader |
+| **Egress & Consumer Signals** | **Leader Only**; Follower nodes remain silent while active Leader handles client `PubAck` TCP flushes and consumer `mset.sch` signals | **Leader Only**; Follower nodes remain silent while active Leader handles client `PubAck` TCP flushes and consumer `mset.sch` signals |

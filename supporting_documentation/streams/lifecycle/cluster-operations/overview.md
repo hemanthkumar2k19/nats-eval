@@ -1,6 +1,6 @@
 # Cluster Operations Overview & Administrative Controls
 
-NATS JetStream provides operational controls, safety mechanisms, and administrative interventions to manage stream durability, maintain Raft consensus health, recover from disasters, and execute cluster maintenance. This document covers storage sync policies (`SyncAlways`), emergency quorum overrides (`RescueQuorum`), dynamic membership management (`EvictPeers`), apply channel controls (`PauseApply`), non-voting observer mode (`SetObserver`), and automated reconciliation (`meta.reconcile`).
+NATS JetStream provides operational controls, safety mechanisms, and administrative interventions to manage stream durability, maintain Raft consensus health, recover from disasters, and execute cluster maintenance. This document covers storage sync policies (`SyncAlways`), emergency quorum overrides (`RescueQuorum`), dynamic membership management (`EvictPeers` / `ProposeAddPeer` / `ProposeRemovePeer`), stream balancing & migration (`runStreamMigration`), apply channel controls (`PauseApply`), non-voting observer mode (`SetObserver`), and automated reconciliation (`meta.reconcile`).
 
 ---
 
@@ -8,8 +8,8 @@ NATS JetStream provides operational controls, safety mechanisms, and administrat
 
 In a distributed NATS JetStream cluster, operations span three distinct administrative domains:
 
-1. **Storage Durability Controls**: Regulating operating system disk flushing (`fsync`) vs. Raft network replication performance.
-2. **Consensus & Emergency Interventions**: Overriding Raft quorum rules (`RescueQuorum`) or evicting dead peers (`EvictPeers`) during catastrophic hardware failures.
+1. **Storage Durability Controls**: Regulating operating system disk flushing (`fsync`) vs. Raft network replication performance (`FileStore` vs. `MemStore`).
+2. **Consensus & Emergency Interventions**: Overriding Raft quorum rules (`RescueQuorum`), scaling stream replicas (`ProposeAddPeer`), evicting peers (`ProposeRemovePeer`), or migrating stream placement (`runStreamMigration`).
 3. **Operational State Controls**: Pausing state machine execution (`PauseApply`), running read-only shadow replicas (`SetObserver`), and automated self-healing reconciliation (`meta.reconcile`).
 
 ---
@@ -44,7 +44,7 @@ Operating systems buffer file writes in volatile RAM (the kernel page cache) to 
 
 ---
 
-## 3. Administrative Consensus Interventions
+## 3. Administrative Consensus Interventions & Cluster Operations
 
 ### 3.1 Emergency Quorum Override (`RescueQuorum`)
 
@@ -78,22 +78,59 @@ Under standard Raft rules, a 3-node cluster requires 2 nodes for quorum ($Q = \l
 
 ---
 
-### 3.2 Manual Peer Eviction & Dynamic Resizing (`EvictPeers` & `ProposeRemovePeer`)
+### 3.2 Manual Peer Eviction & Scale-Down (`EvictPeers` & `ProposeRemovePeer`)
 
 #### What
-An internal API allowing operators to dynamically strip dead or decommissioned peer nodes out of a stream's Raft group (`raft.go`).
+An internal administrative API allowing operators or cluster controllers to evict peer nodes out of a stream's Raft group (`raft.go`).
 
 #### Why
-If a server node is permanently retired or scaled down, its peer ID must be removed from the Raft membership list so it no longer counts against majority quorum calculations ($Q = \lfloor N/2 \rfloor + 1$).
+If a server node is retired, scaled down ($R=3 \rightarrow R=1$), or permanently lost, its peer ID must be removed from the Raft membership list so it no longer counts against majority quorum calculations ($Q = \lfloor N/2 \rfloor + 1$).
 
 #### Code-Level Flow
-1. Operator or Meta-Controller issues `EvictPeers([]string{deadNodeID})`.
-2. Leader packages a special membership entry `ProposeRemovePeer(peerID)`.
-3. Once committed by remaining peers, all nodes delete the peer from `n.peers` and execute `recalcQuorum()`, shrinking quorum size dynamically.
+1. Operator or Meta-Controller issues `EvictPeers([]string{deadNodeID})` or updates `Replicas`.
+2. **Graceful Leader Stepdown Guard**: If the node to be evicted is the active Leader, it calls `n.StepDown(preferred)` to hand over leadership to a non-evicted follower **first**.
+3. Leader packages a membership change entry `ProposeRemovePeer(peerID)`.
+4. Once committed by remaining peers, all nodes delete the peer from `n.peers` and execute `n.recalcQuorum()`, shrinking quorum size dynamically.
+5. **Storage Cleanup**: Evicted node stops its `raftNode` (`n.Stop()`) and purges its storage backend (`FileStore` deletes disk block files via `os.RemoveAll()`; `MemStore` releases RAM to Go Garbage Collection).
 
 ---
 
-### 3.3 State Machine Apply Pause/Resume (`PauseApply` & `ResumeApply`)
+### 3.3 Peer Scale-Up & Node Addition (`ProposeAddPeer`)
+
+#### What
+The operational process of adding a new candidate node to an existing stream Raft group to expand replication ($R=1 \rightarrow R=3$) or replace a failed replica (`jetstream_cluster.go`).
+
+#### Why
+Enables clusters to expand stream fault tolerance live without stopping client publishers or taking the stream offline.
+
+#### Code-Level Flow
+1. Operator triggers scale-up or Meta Leader runs `cc.selectPeerGroup()` to rank candidates based on disk/memory availability, liveness, and placement anti-affinity rules (`uniqueTag`).
+2. Target node receives assignment from `$JS.META`, creates local storage (`FileStore` / `MemStore`), and spawns a `raftNode` in Follower state (`pindex = 0`).
+3. Stream Leader calls `n.ProposeAddPeer(newNodeID)` to propose an `EntryAddPeer` log entry to the Raft WAL.
+4. **Non-Blocking Catchup (`catchupPeers`)**: Target node starts empty and is placed in `catchupPeers`. It receives compressed S2 snapshot chunks over `$SYS.RAFT` in the background and is **strictly excluded from quorum voting** while catching up.
+5. **Quorum Expansion**: Once target node's `appliedIndex == commitIndex`, Leader removes it from `catchupPeers` and calls `n.recalcQuorum()`, expanding quorum size ($Q = \lfloor R/2 \rfloor + 1$).
+
+---
+
+### 3.4 Stream Balancing & Migration Operations (`runStreamMigration`)
+
+#### What
+The operational workflow for re-homing stream replicas from an existing peer set $A$ to a target peer set $B$ across cluster nodes (`jetstream_cluster.go`).
+
+#### Why
+Used to rebalance stream assets across cluster servers, evacuate streams from degrading hardware, or adjust stream placement according to updated tag rules.
+
+#### Code-Level Flow
+1. **Desired State Proposal**: Meta Leader proposes an updated `streamAssignment` with `Group.Desired.Move = true` into the `$JS.META` Raft log.
+2. **Phased Overlap Expansion ($A \rightarrow A \cup B \rightarrow B$)**: Stream Leader calls `extendPeerSet()` -> `n.ProposeAddPeer()` to add target candidate nodes. Peer set temporarily expands to $A \cup B$.
+3. **Background Sync**: Target nodes download S2 compressed snapshot blocks in the background while old nodes continue serving quorum votes for client publishes.
+4. **Leadership Handover**: If the active Leader itself is being migrated, it executes `StepDown(preferred)` to hand over leadership to a caught-up target replica *before* evicting old nodes.
+5. **Old Peer Eviction**: Once target nodes are caught up (`catchups == 0`), Leader calls `removeEvictedPeers()` -> `n.ProposeRemovePeer()` to evict old nodes one by one and shrink the peer set to $B$.
+6. **Single Inflight Guard (`osa.moveInFlight()`)**: NATS strictly forbids overlapping move or scale operations per stream to prevent state drift.
+
+---
+
+### 3.5 State Machine Apply Pause/Resume (`PauseApply` & `ResumeApply`)
 
 #### What
 An internal safety lock that temporarily suspends committed entry processing onto the stream state machine (`FileStore`).
@@ -109,7 +146,7 @@ When a follower falls far behind (e.g., after a network partition or server rest
 
 ---
 
-### 3.4 Non-Voting Observer Mode (`SetObserver`)
+### 3.6 Non-Voting Observer Mode (`SetObserver`)
 
 #### What
 Converts a Raft node into a passive, read-only "Observer" (`raft.go`).
@@ -119,12 +156,12 @@ Used when operators want a node to replicate stream data for local read scaling,
 
 #### Code-Level Flow
 1. `n.observer = true` is set on the node.
-2. The node receives `AppendEntries` over `$SYS.RAFT.<group_id>.A` and writes to its local `FileStore`.
+2. The node receives `AppendEntries` over `$SYS.RAFT.<group_id>.A` and writes to its local `FileStore` / `MemStore`.
 3. **Quorum Exclusion**: `n.observer` nodes are strictly excluded from `recalcQuorum()` and cannot cast votes or become Leader.
 
 ---
 
-### 3.5 Meta Leader Automated Reconciliation Loop (`meta.reconcile`)
+### 3.7 Meta Leader Automated Reconciliation Loop (`meta.reconcile`)
 
 #### What
 An autonomous background reconciliation loop running on the Meta Leader (`$JS.META`) that continuously audits all stream Raft groups in the cluster.
@@ -145,8 +182,9 @@ Guarantees that if a node crashes or disk fails, the cluster automatically repai
 | :--- | :--- | :--- | :--- |
 | **Disk Sync Policy** | `opts.SyncAlways` (`filestore.go`) | Storage Durability | Single-node power-loss protection; auto-relaxed in $R > 1$ clusters |
 | **Emergency Quorum** | `RescueQuorum(qn)` (`raft.go`) | Consensus Recovery | Lower quorum size to recover deadlocked cluster after catastrophic peer loss |
-| **Peer Eviction** | `EvictPeers()` (`raft.go`) | Membership Management | Remove dead nodes and dynamically shrink cluster quorum |
-| **Peer Scale-Up / Add Node** | `ProposeAddPeer()` (`raft.go`) | Replica Expansion | Scale up stream replicas or allocate replacement nodes with non-blocking catchup |
+| **Peer Scale-Down / Remove Node** | `EvictPeers()` / `ProposeRemovePeer()` (`raft.go`) | Membership Management | Remove dead/decommissioned nodes and dynamically shrink cluster quorum |
+| **Peer Scale-Up / Add Node** | `ProposeAddPeer()` (`raft.go`, `jetstream_cluster.go`) | Replica Expansion | Scale up stream replicas or allocate replacement nodes with non-blocking catchup |
+| **Stream Balancing & Migration** | `runStreamMigration()` (`jetstream_cluster.go`) | Asset Rebalancing | Re-home stream replicas onto new nodes with zero downtime and $A \cup B$ overlap |
 | **Apply Suspension** | `PauseApply()` / `ResumeApply()` (`raft.go`) | State Protection | Prevent state corruption during large follower catch-up syncs |
 | **Read-Only Shadowing** | `SetObserver(true)` (`raft.go`) | Read Scaling | Replicate data for local reads without impacting Raft quorum voting |
 | **Auto Self-Healing** | `meta.reconcile` loop (`jetstream_cluster.go`) | Autonomous Repair | Reallocate stream replicas automatically when a node dies |

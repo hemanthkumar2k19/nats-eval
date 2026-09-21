@@ -1,6 +1,6 @@
 # Peer Removal & Stream Replica Scale-Down
 
-Removing a node or scaling down stream replicas in NATS JetStream shrinks fault tolerance ($R > 1 \rightarrow R=1$) or evicts failed/degraded peers from stream Raft groups. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during node removal.
+Removing a node or scaling down stream replicas in NATS JetStream shrinks fault tolerance ($R > 1 \rightarrow R=1$) or evicts failed/degraded peers from stream Raft groups. While the Raft membership proposal and quorum shrinking are storage-agnostic, the final resource destruction phase adapts based on the stream's storage backend (**`FileStore` vs `MemStore`**).
 
 ---
 
@@ -33,16 +33,25 @@ sequenceDiagram
     Note over Meta: Updates streamAssignment (Desired.ScaleDown = true)
     Meta->>Meta: Propose assignment update to $JS.META WAL
     Meta->>Leader: Broadcast committed assignment
+    
     opt Target Peer is Current Leader
         Leader->>Leader: 2. Execute StepDown(preferred) to follower first
     end
+    
     Leader->>Leader: 3. Call ProposeRemovePeer(targetNodeID)
     Leader->>Quorum: Replicate EntryRemovePeer log entry
     Quorum-->>Leader: Majority Quorum Commit Reached
+    
     Leader->>Leader: 4. Remove target from n.peers & shrink quorum (recalcQuorum)
     Quorum->>Quorum: Recalculate Quorum size (e.g. Q=2 to Q=1)
+    
     Leader->>Target: 5. Signal Peer Removal Notification
-    Note over Target: Stops raftNode (n.Stop()) & purges FileStore from disk
+    
+    alt FileStore (Disk Storage Mode)
+        Note over Target: Stops raftNode & purges disk directory from filesystem (os.RemoveAll)
+    else MemStore (Memory Storage Mode)
+        Note over Target: Stops raftNode & purges RAM data structure; Go GC reclaims memory
+    end
 ```
 
 ### 2.1 Working Principles
@@ -50,7 +59,9 @@ sequenceDiagram
 - **Graceful Leader Eviction**: If the active Stream Leader is targeted for removal, it executes `StepDown(preferred)` to transfer leadership to a non-evicted follower *before* removing itself, eliminating publish errors or dropped messages.
 - **Single Membership Change Guard (`n.membChange`)**: Raft strictly enforces that only one membership change (add or remove) can be processed at a time. This prevents concurrent membership modifications that could cause Raft split-brain conditions.
 - **Immediate Quorum Shrinking**: Upon quorum commit of `EntryRemovePeer`, all surviving nodes update their `n.peers` map and immediately invoke `n.recalcQuorum()`, reducing the required consensus quorum size ($Q = \lfloor R/2 \rfloor + 1$) without waiting for target cleanup.
-- **Storage Resource Reclaim**: The evicted node unsubscribes from internal system subjects, terminates its Raft timers, and purges all stream block files (`1.blk`) and directory structures from disk.
+- **Storage-Specific Resource Reclamation**:
+  - **`FileStore` (Disk)**: The evicted node unsubscribes from internal system subjects, terminates its Raft timers, and purges all stream block files (`1.blk`) and directory structures from physical disk storage via `os.RemoveAll()`.
+  - **`MemStore` (Memory)**: The evicted node unsubscribes from system subjects, terminates Raft timers, and releases all in-memory byte slice arrays back to the Go Garbage Collector (`debug.FreeOSMemory()`).
 
 ---
 
@@ -103,17 +114,19 @@ sequenceDiagram
 
 1. Target node receives the removal update from `$JS.META` or Raft apply loop.
 2. Invokes `n.Stop()` to terminate Raft timers and unsubscribe from `$SYS.RAFT` subjects.
-3. Calls `mset.store.Delete()` to delete block files (`1.blk`) and clean up the storage directory from disk.
+3. Calls `mset.store.Delete()`:
+   - **`FileStore` Mode**: Deletes block files (`1.blk`) and purges directory from disk via `os.RemoveAll()`.
+   - **`MemStore` Mode**: Clears byte slice pointers, releasing RAM back to Go Garbage Collection (`debug.FreeOSMemory()`).
 
 ---
 
 ## 4. Operational & Performance Impact During Operation
 
-| Operational Dimension | Impact Level | Detailed Behavioral Characteristics |
+| Operational Dimension | `FileStore` (Disk Storage Mode) | `MemStore` (Memory Storage Mode) |
 | :--- | :--- | :--- |
-| **Client Publish Latency** | Zero Impact | Client writes continue normally on remaining quorum nodes without interruption |
-| **Leadership Transition** | Graceful StepDown | If active leader is removed, it executes `StepDown(preferred)` before self-eviction, preventing publisher errors |
-| **Quorum Availability** | Instant Shrink | Quorum size ($Q$) shrinks immediately upon `EntryRemovePeer` commit (e.g., $Q=2 \rightarrow 1$), preserving write availability |
-| **Network & CPU Load** | Immediate Reduction | Eliminates background heartbeat and replication traffic to the evicted node |
-| **Disk Storage** | Reclaimed Space | Evicted node purges block files (`1.blk`) and removes local storage directory from disk |
-| **Membership Safety** | Single Guard | `n.membChange` guard enforces single membership change at a time to prevent Raft split-brain |
+| **Client Publish Latency** | **Zero Impact**; client writes continue normally on remaining quorum nodes without interruption | **Zero Impact**; client writes continue normally on remaining quorum nodes without interruption |
+| **Leadership Transition** | **Graceful StepDown**; if active leader is removed, it executes `StepDown(preferred)` before self-eviction, preventing publisher errors | **Graceful StepDown**; if active leader is removed, it executes `StepDown(preferred)` before self-eviction, preventing publisher errors |
+| **Quorum Availability** | **Instant Shrink**; quorum size ($Q$) shrinks immediately upon `EntryRemovePeer` commit (e.g., $Q=2 \rightarrow 1$), preserving write availability | **Instant Shrink**; quorum size ($Q$) shrinks immediately upon `EntryRemovePeer` commit (e.g., $Q=2 \rightarrow 1$), preserving write availability |
+| **Network & CPU Load** | **Immediate Reduction**; eliminates background heartbeat and replication traffic to the evicted node | **Immediate Reduction**; eliminates background heartbeat and replication traffic to the evicted node |
+| **Storage Resource Reclaim**| **OS Disk Space Reclaimed**; evicted node purges block files (`1.blk`) and removes directory from filesystem via `os.RemoveAll()` | **RAM Reclaimed via Go GC**; evicted node releases memory structures to Go Garbage Collector (`debug.FreeOSMemory()`) |
+| **Membership Safety** | **Single Guard**; `n.membChange` guard enforces single membership change at a time to prevent Raft split-brain | **Single Guard**; `n.membChange` guard enforces single membership change at a time to prevent Raft split-brain |

@@ -1,6 +1,6 @@
 # Stream Balancing & Peer Migration Operations
 
-Stream balancing and peer migration in NATS JetStream allows operators or cluster self-healing mechanisms to rebalance stream replicas across cluster nodes, evacuate streams from degrading hardware, or adjust stream placement according to tag rules. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during stream balancing and migration.
+Stream balancing and peer migration in NATS JetStream allow operators or cluster self-healing mechanisms to rebalance stream replicas across cluster nodes, evacuate streams from degrading hardware, or adjust stream placement according to tag rules. This document details the trigger pathways, high-level conceptual flow, Go runtime mechanics, and operational performance impact during stream balancing and migration across both **`FileStore` (Disk)** and **`MemStore` (Memory)** storage modes.
 
 ---
 
@@ -33,25 +33,48 @@ sequenceDiagram
     Note over Meta: Calculates target peer set (Desired.Move = true)
     Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
     Meta->>Leader: Broadcast committed assignment update
+    
     Leader->>Leader: 2. Install Raft Snapshot & call extendPeerSet()
     Leader->>Target: ProposeAddPeer(targetNodeID)
-    Note over Target: Initializes local FileStore & joins stream Raft bus
-    Leader->>Target: 3. Stream compressed S2 Snapshot & WAL catch-up
-    Note over Target: Populates FileStore in background (excluded from quorum)
+    
+    alt FileStore (Disk Storage Mode)
+        Note over Target: Creates disk directory & instantiates FileStore (fs)
+    else MemStore (Memory Storage Mode)
+        Note over Target: Instantiates MemStore (ms) in RAM (starts at 0 msgs)
+    end
+    
+    alt Catch-up via Snapshot (FileStore vs MemStore)
+        Leader->>Target: 3a. Stream S2 Compressed Snapshot & WAL Catch-up
+        Note over Leader, Target: FileStore: Leader reads 1.blk files; Target streams chunks directly to disk (1.blk)
+    else MemStore Catch-up
+        Leader->>Target: 3b. Stream S2 Compressed Snapshot & WAL Catch-up
+        Note over Leader, Target: MemStore: Leader reads RAM slice; Target allocates Go heap RAM for stream history
+    end
+
     Target-->>Leader: Catchup complete (catchups == 0)
+    
     opt Active Leader is being Evicted
         Leader->>Leader: 4. Execute StepDown(preferred)
         Leader->>Target: Transfer leadership to caught-up target
     end
+    
     Leader->>OldNode: 5. ProposeRemovePeer(oldNodeID)
-    Note over OldNode: Stops raftNode & purges local FileStore from disk
+    
+    alt Storage Eviction & Cleanup
+        Note over OldNode: FileStore: Stops raftNode & purges disk directory from filesystem (os.RemoveAll)
+    else MemStore Eviction & Cleanup
+        Note over OldNode: MemStore: Stops raftNode & purges RAM data structure; Go GC reclaims memory
+    end
 ```
 
 ### 2.1 Working Principles
 
-- **Phased Overlap Expansion**: The stream peer set temporarily expands from existing peers to the combined peer set while target nodes catch up, ensuring the stream is never under-replicated.
+- **Phased Overlap Expansion ($A \rightarrow A \cup B \rightarrow B$)**: The stream peer set temporarily expands from existing peers to the combined peer set while target nodes catch up, ensuring the stream is never under-replicated.
 - **Strict Quorum Protection during Migration**: Old nodes continue serving quorum votes while target nodes download snapshots in the background. Old nodes are only evicted after target nodes are 100% caught up.
 - **Single Inflight Reconfiguration Guard (`osa.moveInFlight()`)**: NATS strictly forbids overlapping move or scale operations per stream to prevent cluster state drift.
+- **Storage-Specific Migration Behavior**:
+  - **`FileStore` (Disk)**: Target node streams snapshot chunks directly to disk block files (`1.blk`). Memory footprint remains constant; performance is bound by disk I/O write throughput. Upon eviction, old nodes purge disk block files using `os.RemoveAll`.
+  - **`MemStore` (Memory)**: Target node streams snapshot chunks into RAM memory structures. Target node experiences a rapid Go heap memory allocation spike; performance is bound by network throughput and RAM bus speed. Upon eviction, RAM memory is reclaimed via Go Garbage Collection (`debug.FreeOSMemory()`).
 - **Zero-Downtime Leadership Transition**: If the active Stream Leader itself is being migrated, it executes `StepDown(preferred)` to hand over leadership to a caught-up target replica *before* evicting old nodes.
 
 ---
@@ -77,7 +100,9 @@ sequenceDiagram
 
 1. Stream Leader reads `sa.Group.desiredSnapshot(leaderTerm)`.
 2. Verifies `n.NeedSnapshot()`. Flushes pending writes (`mset.flushAllPending()`) and installs snapshot via `n.InstallSnapshot(mset.stateSnapshot(), true)`.
-3. Calls `s.extendPeerSet(n, ...)` -> `n.ProposeAddPeer(add)` to add target candidate nodes to the Raft group.
+3. Calls `s.extendPeerSet(n, ...)` -> `n.ProposeAddPeer(add)` to add target candidate nodes to the Raft group:
+   - **FileStore Mode**: Instantiates `fileStore` (`server/filestore.go`), creating active storage directories on disk.
+   - **MemStore Mode**: Instantiates `memStore` (`server/memstore.go`), allocating in-memory message data structures.
 
 ### 3.3 Step 3: Background Catch-up & Quorum Guard (`mset.catchupPeers`)
 
@@ -86,7 +111,9 @@ sequenceDiagram
 - **Goroutine Context**: Sync Worker Goroutines
 
 1. Target node is tracked in `catchups := mset.catchupPeers()`.
-2. Leader streams compressed S2 snapshot blocks over `$SYS.RAFT.<group_id>.A`.
+2. Leader streams compressed S2 snapshot blocks over `$SYS.RAFT.<group_id>.A`:
+   - **FileStore Mode**: Writes incoming data chunks directly to disk block files (`1.blk`) and updates sparse disk index tables.
+   - **MemStore Mode**: Appends incoming message byte arrays directly into Go slice structures in RAM.
 3. `runStreamMigration()` delays peer eviction while `len(catchups) > 0`.
 
 ### 3.4 Step 4: StepDown & Old Peer Eviction (`s.removeEvictedPeers`)
@@ -98,16 +125,20 @@ sequenceDiagram
 1. Once `catchups` is empty, `removeEvictedPeers()` identifies old nodes no longer in `desiredPeers`.
 2. If the Leader itself is being evicted, it calls `n.StepDown(preferred)` to hand over leadership first.
 3. Calls `n.ProposeRemovePeer(remove)` to evict old nodes one by one.
-4. Evicted node receives notification, stops `raftNode`, and purges its local `FileStore` directory from disk (`mset.store.Delete()`).
+4. Evicted node receives notification, stops `raftNode`, and purges its storage directory:
+   - **FileStore Mode**: Deletes block files (`1.blk`) and purges directory from disk via `mset.store.Delete()`.
+   - **MemStore Mode**: Purges in-memory byte slice structures and releases RAM to Go Garbage Collection.
 
 ---
 
 ## 4. Operational & Performance Impact During Operation
 
-| Operational Dimension | Impact Level | Detailed Behavioral Characteristics |
+| Operational Dimension | `FileStore` (Disk Storage Mode) | `MemStore` (Memory Storage Mode) |
 | :--- | :--- | :--- |
-| **Client Publish Availability** | Zero Downtime | Client publishes continue normally; active quorum processes ACKs while target nodes catch up |
-| **Network Bandwidth** | Temporary Spike | Snapshot data transfer to target nodes generates temporary network traffic on system subjects (`$SYS.RAFT`) |
-| **Disk & Memory Overhead** | Temporary Allocation | Stream data is briefly duplicated across old and target nodes during migration until old nodes are evicted |
-| **Leadership Transition** | Zero Message Loss | If the leader node is being migrated, it executes `StepDown(preferred)` before eviction, preventing publisher errors |
-| **Reconfiguration Safety** | Single Guard | `moveInFlight()` prevents concurrent move or scale operations per stream to prevent state drift |
+| **Client Publish Availability** | **Zero Impact**; active quorum processes ACKs while target nodes catch up in background | **Zero Impact**; active quorum processes ACKs while target nodes catch up in background |
+| **Network Bandwidth** | **Moderate to High**; Leader streams compressed S2 snapshot chunks over `$SYS.RAFT.<group_id>.A` to target node | **Extremely High**; Leader streams full in-memory message history over network; bounded by network interface card (NIC) throughput |
+| **Leader Resource Impact** | **Moderate Disk & CPU**; Leader reads block files (`1.blk`) sequentially from disk and compresses chunks using S2 | **Moderate CPU & RAM**; Leader reads message slices directly from RAM and compresses chunks using S2 |
+| **Target Node Resource Impact**| **High Disk I/O**; Target node writes incoming snapshot chunks directly to disk block files (`1.blk`) | **High Memory (RAM) Spike**; Target node allocates Go heap memory rapidly to store incoming stream history |
+| **Primary System Bottleneck**| **Disk I/O Write Bandwidth & IOPS** | **Network Throughput & Memory Allocation (GC)** |
+| **Old Node Eviction & Cleanup**| **OS Disk Space Reclaimed**; Filesystem block files (`1.blk`) deleted via `os.RemoveAll()` | **RAM Reclaimed via Go GC**; In-memory data structures released to Go Garbage Collector |
+| **Transitional Space Overhead**| **Temporary Disk Double-Allocation**; Stream storage footprint is doubled across old and target disks ($A \cup B$) until eviction | **Temporary RAM Double-Allocation**; Stream memory footprint is doubled across old and target RAM ($A \cup B$) until eviction |
