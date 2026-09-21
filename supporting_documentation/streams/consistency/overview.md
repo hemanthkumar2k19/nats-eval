@@ -33,13 +33,14 @@ This subject acts as a dedicated private virtual bus for all Raft nodes assigned
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Leader as Stream Leader (Node-A)
-    participant NodeB as Replica (Node-B)
-    participant NodeC as Replica (Node-C)
+    participant Leader as "Stream Leader (Node-A)"
+    participant NodeB as "Replica (Node-B)"
+    participant NodeC as "Replica (Node-C)"
 
-    Leader->>NodeB: Publish AppendEntries / Heartbeat ($JSC.SYNC.v9x7K2.Node-B)
-    Leader->>NodeC: Publish AppendEntries / Heartbeat ($JSC.SYNC.v9x7K2.Node-C)
-    Note over NodeB,NodeC: Replicas write WAL entry & verify term
+    Leader->>NodeB: Publish AppendEntries / Heartbeat
+    Leader->>NodeC: Publish AppendEntries / Heartbeat
+    Note over NodeB: Replicas write WAL entry & verify term
+    Note over NodeC: Replicas write WAL entry & verify term
     NodeB-->>Leader: Send Follower ACK ($JSC.R.v9x7K2)
     NodeC-->>Leader: Send Follower ACK ($JSC.R.v9x7K2)
     Note over Leader: Majority Quorum Reached (Q=2/3) -> Mark COMMITTED

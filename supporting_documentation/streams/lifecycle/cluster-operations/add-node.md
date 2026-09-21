@@ -22,34 +22,21 @@ Stream replica scale-up or peer addition can be initiated through three distinct
 sequenceDiagram
     autonumber
     actor Op as Operator / Client
-    participant Meta as Meta Leader ($JS.META)
+    participant Meta as "Meta Leader ($JS.META)"
     participant Target as Target Node
     participant Leader as Stream Leader
     participant Quorum as Stream Raft Quorum
 
     Op->>Meta: 1. Trigger Scale-Up / Peer Addition API
-    Note over Meta: Checks quotas, ranks nodes via selectPeerGroup()
-    Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
+    Note over Meta: Checks quotas & ranks nodes via selectPeerGroup()
+    Meta->>Meta: Propose updated streamAssignment to WAL
     Meta->>Target: 2. Broadcast committed assignment
-    
-    alt FileStore (Disk Storage Mode)
-        Note over Target: Creates disk directory & instantiates FileStore (fs)
-    else MemStore (Memory Storage Mode)
-        Note over Target: Instantiates MemStore (ms) in RAM (starts at 0 msgs)
-    end
-    
-    Target->>Leader: Join stream Raft bus ($SYS.RAFT)
+    Note over Target: Local Init: Creates storage (FileStore directory / MemStore RAM) & spawns Follower
+    Target->>Leader: Join stream Raft bus
     Leader->>Leader: 3. Detect target peer & call ProposeAddPeer()
     Leader->>Quorum: Replicate EntryAddPeer entry
-    
-    alt Catch-up via Snapshot (FileStore vs MemStore)
-        Leader->>Target: 4a. Stream S2 Compressed Snapshot & WAL Catch-up
-        Note over Leader, Target: FileStore: Leader reads 1.blk files; Target streams chunks directly to disk (1.blk)
-    else MemStore Catch-up
-        Leader->>Target: 4b. Stream S2 Compressed Snapshot & WAL Catch-up
-        Note over Leader, Target: MemStore: Leader reads RAM slice; Target allocates Go heap RAM for stream history
-    end
-
+    Leader->>Target: 4. Stream S2 Compressed Snapshot & WAL Catch-up
+    Note over Target: Catch-up Sync: Leader reads storage & streams S2 chunks to Target
     Target-->>Leader: Catchup complete (appliedIndex == commitIndex)
     Leader->>Leader: 5. Recalculate Quorum (recalcQuorum)
     Leader->>Quorum: Promote Target to full voting member (Q expanded)

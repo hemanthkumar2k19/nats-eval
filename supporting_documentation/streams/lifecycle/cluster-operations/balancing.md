@@ -24,47 +24,25 @@ Stream balancing or migration can be initiated through three distinct pathways:
 sequenceDiagram
     autonumber
     actor Op as Operator / Client
-    participant Meta as Meta Leader ($JS.META)
+    participant Meta as "Meta Leader ($JS.META)"
     participant Leader as Active Stream Leader
     participant Target as Target Candidate Peer(s)
     participant OldNode as Evicted Old Peer(s)
 
     Op->>Meta: 1. Trigger Stream Migration / Rebalance
     Note over Meta: Calculates target peer set (Desired.Move = true)
-    Meta->>Meta: Propose updated streamAssignment to $JS.META WAL
+    Meta->>Meta: Propose updated streamAssignment to WAL
     Meta->>Leader: Broadcast committed assignment update
-    
     Leader->>Leader: 2. Install Raft Snapshot & call extendPeerSet()
     Leader->>Target: ProposeAddPeer(targetNodeID)
-    
-    alt FileStore (Disk Storage Mode)
-        Note over Target: Creates disk directory & instantiates FileStore (fs)
-    else MemStore (Memory Storage Mode)
-        Note over Target: Instantiates MemStore (ms) in RAM (starts at 0 msgs)
-    end
-    
-    alt Catch-up via Snapshot (FileStore vs MemStore)
-        Leader->>Target: 3a. Stream S2 Compressed Snapshot & WAL Catch-up
-        Note over Leader, Target: FileStore: Leader reads 1.blk files; Target streams chunks directly to disk (1.blk)
-    else MemStore Catch-up
-        Leader->>Target: 3b. Stream S2 Compressed Snapshot & WAL Catch-up
-        Note over Leader, Target: MemStore: Leader reads RAM slice; Target allocates Go heap RAM for stream history
-    end
-
+    Note over Target: Local Init: Creates storage (FileStore directory / MemStore RAM) & spawns Follower
+    Leader->>Target: 3. Stream S2 Compressed Snapshot & WAL Catch-up
+    Note over Target: Catch-up Sync: Leader reads storage & streams S2 chunks to Target
     Target-->>Leader: Catchup complete (catchups == 0)
-    
-    opt Active Leader is being Evicted
-        Leader->>Leader: 4. Execute StepDown(preferred)
-        Leader->>Target: Transfer leadership to caught-up target
-    end
-    
+    Leader->>Leader: 4. Execute StepDown(preferred) if Leader is being evacuated
+    Leader->>Target: Transfer leadership to caught-up target
     Leader->>OldNode: 5. ProposeRemovePeer(oldNodeID)
-    
-    alt Storage Eviction & Cleanup
-        Note over OldNode: FileStore: Stops raftNode & purges disk directory from filesystem (os.RemoveAll)
-    else MemStore Eviction & Cleanup
-        Note over OldNode: MemStore: Stops raftNode & purges RAM data structure; Go GC reclaims memory
-    end
+    Note over OldNode: Eviction & Cleanup: Stops raftNode & purges storage (os.RemoveAll / Go GC)
 ```
 
 ### 2.1 Working Principles

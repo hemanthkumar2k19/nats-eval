@@ -1,4 +1,11 @@
-# Changelog
+## [2026-09-21] - Cluster Operations & Consistency Mermaid Diagram Syntax Fix
+
+### Fixed
+- Quoted all sequence diagram participant labels containing parentheses (e.g. `participant Meta as "Meta Leader ($JS.META)"`, `participant Storage as "Storage Engine (FileStore vs MemStore)"`) across `add-node.md`, `balancing.md`, `remove-node.md`, `write.md`, `operation-flow.md`, and `overview.md`.
+- Removed nested `alt`/`else` blocks containing `Note over` statements from `write.md` sequence diagram, replacing with a single linear interaction step to satisfy strict Mermaid parser rules.
+- Fixed multi-participant note syntax by separating notes per participant (`Note over NodeB: ...`, `Note over NodeC: ...`).
+- **Reason**: Fixes syntax parse errors (such as `Parse error on line 26: ... Expecting 'SOLID_OPEN_ARROW' ... got 'NEWLINE'`) caused by unquoted parentheses and nested `alt`/`else` note blocks in Mermaid sequence diagrams.
+- **Affected area**: Documentation (`supporting_documentation/streams/lifecycle/cluster-operations/` & `supporting_documentation/streams/consistency/`).
 
 ## [2026-09-18] - Stream Cluster Operations & Consistency Documentation Refactoring
 

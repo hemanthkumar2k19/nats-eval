@@ -24,34 +24,23 @@ Stream replica scale-down or peer removal can be initiated through three distinc
 sequenceDiagram
     autonumber
     actor Op as Operator / Client
-    participant Meta as Meta Leader ($JS.META)
+    participant Meta as "Meta Leader ($JS.META)"
     participant Leader as Stream Leader
     participant Target as Target Evicted Peer
     participant Quorum as Remaining Raft Quorum
 
     Op->>Meta: 1. Trigger Peer Removal / Scale-Down API
     Note over Meta: Updates streamAssignment (Desired.ScaleDown = true)
-    Meta->>Meta: Propose assignment update to $JS.META WAL
+    Meta->>Meta: Propose assignment update to WAL
     Meta->>Leader: Broadcast committed assignment
-    
-    opt Target Peer is Current Leader
-        Leader->>Leader: 2. Execute StepDown(preferred) to follower first
-    end
-    
+    Leader->>Leader: 2. Execute StepDown(preferred) first if Target is current Leader
     Leader->>Leader: 3. Call ProposeRemovePeer(targetNodeID)
     Leader->>Quorum: Replicate EntryRemovePeer log entry
     Quorum-->>Leader: Majority Quorum Commit Reached
-    
     Leader->>Leader: 4. Remove target from n.peers & shrink quorum (recalcQuorum)
     Quorum->>Quorum: Recalculate Quorum size (e.g. Q=2 to Q=1)
-    
     Leader->>Target: 5. Signal Peer Removal Notification
-    
-    alt FileStore (Disk Storage Mode)
-        Note over Target: Stops raftNode & purges disk directory from filesystem (os.RemoveAll)
-    else MemStore (Memory Storage Mode)
-        Note over Target: Stops raftNode & purges RAM data structure; Go GC reclaims memory
-    end
+    Note over Target: Storage Eviction: Stops raftNode & purges storage (os.RemoveAll / Go GC)
 ```
 
 ### 2.1 Working Principles

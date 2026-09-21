@@ -45,7 +45,7 @@ sequenceDiagram
     actor Client as Client / System
     participant Leader as Stream Raft Leader
     participant Followers as Follower Replicas
-    participant Storage as State Machine Storage (FileStore)
+    participant Storage as "State Machine Storage (FileStore)"
 
     Client->>Leader: 1. Operation Request (Publish / Delete / Purge / Ack)
     Note over Leader: Stage 1: Leader Verification (isLeader, sealed, limits)
