@@ -1,3 +1,41 @@
+## [2026-09-22] - NATS Stream Hands-On Jupyter Presentation Notebook Refactoring
+
+### Changed
+- Refactored presentation notebook [`streams/hands-on/nats-stream-demo.ipynb`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/streams/hands-on/nats-stream-demo.ipynb):
+  - **Multi-Stream Cluster Architecture**: Streams (`EVENTS` R=3, `FILE_STREAM` R=2, `MEMORY_STREAM` R=2, `LIMITS_STREAM` R=1, `INTEREST_STREAM` R=2, `WORKQUEUE_STREAM` R=3, `DISCARD_OLD_STREAM` R=1, `DISCARD_NEW_STREAM` R=2) remain active across sections to provide a rich cluster topology (`nats stream ls`) for Cluster Operations (balancing, Raft leader stepdown, live scaling, peer evacuation).
+  - **Stream Sealing & Preservation**: Section 1 concludes with `EVENTS` remaining sealed and active in the cluster.
+  - **Single Final Teardown**: Replaced intermediate deletions with a single comprehensive cleanup cell at the end of Section 3.
+  - **Configuration Sync**: Updated [`streams/hands-on/stream-update.json`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/streams/hands-on/stream-update.json) to `"storage": "memory"` and `"num_replicas": 3` to match `stream.json`, enabling seamless in-place edit testing (`nats stream edit EVENTS --config=stream-update.json -f`).
+  - **CLI Clean Flags**: Removed `-f` from creation commands (`nats stream add`) while retaining `-f` on interactive prompt commands (`edit`, `rm`, `purge`, `seal`, `stepdown`, `evacuate`).
+  - **Count Template Escaping**: Escaped `{{Count}}` template variables as `{{{{Count}}}}` in notebook code cells to prevent IPython from stripping double-braces before sending to `nats pub --count`.
+  - **Placement Tag & Cluster Ops Fixes**: Fixed `nats stream add PLACED_STREAM --tags="stream:primary" --defaults` flag syntax and updated all Section 3 Cluster Operations (scaling, Raft stepdown, inspection) to consistently target `PLACED_STREAM`.
+  - **Step-by-Step Presentation Splits**: Split combined publish, consumer next, and stream info commands into individual code cells under Interest Retention and WorkQueue Retention for clear live demonstration.
+  - **Git Ignore Cleanup**: Added `.ipynb_checkpoints/` to [`.gitignore`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/.gitignore) to exclude Jupyter auto-save checkpoint directories from version control tracking.
+- **Reason**: Fix command execution failures during sequential presentation and align notebook flow with JetStream immutability rules.
+- **Affected area**: Hands-on demo directory (`streams/hands-on/`) and repository configuration.
+
+## [2026-09-22] - NATS Stream Hands-On Jupyter Presentation Notebook Setup
+
+### Added
+- Expanded presentation Jupyter Notebook [`streams/hands-on/nats-stream-demo.ipynb`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/streams/hands-on/nats-stream-demo.ipynb) aligned with [`streams/hands-on/demo.md`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/streams/hands-on/demo.md):
+  - **Stream Lifecycle**: Creation, Updation (dynamic config edit & Stream Sealing write/purge lockdown), Inspection (`state`, `view`, `get`), and Sequence Handling (`--seq=4`, `--keep=3`, full purge).
+  - **Storage**: File Storage durability vs Memory Storage volatility demo using container restart commands (`!podman-compose down` and `!podman-compose up -d`).
+  - **Retention Policies**: Limits Retention, Interest Retention (multi-consumer ACK), and Work Queue Retention.
+  - **CleanUp (Discard Policies)**: Discard Old vs Discard New policies updated dynamically in-place using `!nats stream edit EVENTS --discard=new`.
+  - **Backup & Recovery**: Local directory snapshot backup and full stream restoration.
+  - **Cluster Operations**: Replica Placement (tag placement constraints), Leadership Step Down (`!nats stream cluster stepdown`), Scaling Up (`--replicas=3`), Scaling Down (`--replicas=1`), Balancing (`!nats stream cluster balance`), and Evacuate Peer (`!nats stream cluster evacuate nats-1 -f`).
+
+### Changed
+- Removed the stream `add` command from post-sealing Cell 07k in `nats-stream-demo.ipynb`, keeping strictly `nats stream rm EVENTS -f 2>&1`.
+- Streamlined the Memory Storage section in `nats-stream-demo.ipynb` to execute strictly `nats stream rm EVENTS -f 2>&1`, removing the stream add command for custom presentation flow.
+- Added explicit stream deletion step (`nats stream rm EVENTS -f 2>&1`) right above the Inspection section in `nats-stream-demo.ipynb`.
+- Updated stream seal command in `nats-stream-demo.ipynb` to use direct CLI sub-command `nats stream seal EVENTS -f 2>&1`.
+- Fixed relative file path for `podman-compose` commands in `nats-stream-demo.ipynb` (`-f ../../deploy/local-nats-cluster/docker-compose.yaml`) so restart commands execute cleanly from `streams/hands-on/`.
+- **Non-Interactive Execution**: Removed `-f` from creation commands (`nats stream add`) while retaining `-f` / `--force` flags on prompt commands (`nats stream edit`, `nats stream rm`, `nats stream purge`, `nats stream seal`, `nats stream cluster stepdown`, `nats stream cluster evacuate`).
+- Removed embedded JSON writefile cells from the notebook for a cleaner presentation layout.
+- **Reason**: Refined hands-on demo to focus strictly on Stream lifecycle and maintain clean reference documentation.
+- **Affected area**: Hands-on demo directory (`streams/hands-on/`).
+
 ## [2026-09-21] - Cluster Operations & Consistency Mermaid Diagram Syntax Fix
 
 ### Fixed

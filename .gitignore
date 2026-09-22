@@ -49,7 +49,26 @@ feature.md
 fix.md 
 
 # Stream backup
-backups/
+backup_demo
 
 # Jira 
 jira.md
+
+# Python
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables / secrets
+.env
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+

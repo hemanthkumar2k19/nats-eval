@@ -1,0 +1,44 @@
+{
+  "name": "EVENTS",
+  "description": "Stream for storing orders, payments, and inventory events",
+  "subjects": [
+    "order.*",
+    "payment.*",
+    "inventory.*"
+  ],
+  "retention": "limits",
+  "max_consumers": -1,
+  "max_msgs_per_subject": -1,
+  "max_msgs": -1,
+  "max_bytes": -1,
+  "max_age": 0,
+  "max_msg_size": -1,
+  "storage": "memory",
+  "discard": "old",
+  "num_replicas": 3,
+  "duplicate_window": 120000000000,
+  "sealed": false,
+  "deny_delete": false,
+  "deny_purge": false,
+  "allow_rollup_hdrs": false,
+  "allow_direct": true,
+  "mirror_direct": false,
+  "discard_new_per_subject": false,
+  "allow_msg_ttl": false,
+  "allow_atomic_publish": false,
+  "allow_batch_publish": false,
+  "allow_msg_counter": false,
+  "allow_msg_schedules": false,
+  "subject_delete_marker_ttl": 0,
+  "first_seq": 1,
+  "compression": "none",
+  "consumer_limits": {
+    "inactive_threshold": 86400000000000,
+    "max_ack_pending": 1000
+  },
+  "metadata": {
+    "env": "development",
+    "team": "orders",
+    "updated_by": "demo"
+  }
+}
