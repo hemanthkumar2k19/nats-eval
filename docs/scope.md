@@ -78,9 +78,17 @@
         - Available consistency configurations
         - Impact on latency, reliability, and durability
 
-5. Deployment and Operational Automation <!-- TODO -->
-    - Kubernetes deployment <!-- TODO -->
-    - VM deployment <!-- TODO -->
-    - Automation via Ansible or similar <!-- TODO -->
-    - Database-style operational guidance <!-- TODO -->
-    - Troubleshooting scenarios (e.g., read-only volume) <!-- TODO -->
+# Consumers
+
+1. Life Cycle
+    - Creation
+    - Updates
+    - Sequence Handling
+    - Retention Handling
+    - Cleanup Policies
+    - Backup and Restore
+    - Criteria for creating separate consumers
+2. Storage
+3. Consistency
+4. Cluster Operations
+5. Observability
