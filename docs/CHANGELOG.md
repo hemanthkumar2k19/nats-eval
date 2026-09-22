@@ -11,8 +11,9 @@
   - **Placement Tag & Cluster Ops Fixes**: Fixed `nats stream add PLACED_STREAM --tags="stream:primary" --defaults` flag syntax and updated all Section 3 Cluster Operations (scaling, Raft stepdown, inspection) to consistently target `PLACED_STREAM`.
   - **Step-by-Step Presentation Splits**: Split combined publish, consumer next, and stream info commands into individual code cells under Interest Retention and WorkQueue Retention for clear live demonstration.
   - **Git Ignore Cleanup**: Added `.ipynb_checkpoints/` to [`.gitignore`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/.gitignore) to exclude Jupyter auto-save checkpoint directories from version control tracking.
-- **Reason**: Fix command execution failures during sequential presentation and align notebook flow with JetStream immutability rules.
-- **Affected area**: Hands-on demo directory (`streams/hands-on/`) and repository configuration.
+  - **Stream Advisories Observability**: Enabled NATS input plugin in [`fluent-bit.conf`](file:///Users/mulukahemanthkumar/Documents/dev/learning/nats/deploy/local-nats-cluster/fluent-bit.conf) subscribing to `$JS.EVENT.ADVISORY.STREAM.>` and streaming real-time stream advisory events directly into Loki (`job=nats-stream-advisories`) for Grafana visualization.
+- **Reason**: Enable real-time JetStream stream advisory event ingestion into the LGTM observability stack.
+- **Affected area**: Deployment configuration (`deploy/local-nats-cluster/`).
 
 ## [2026-09-22] - NATS Stream Hands-On Jupyter Presentation Notebook Setup
 
